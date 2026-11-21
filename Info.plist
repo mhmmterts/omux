@@ -57,6 +57,16 @@
 	</dict>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>omux needs the microphone so the agents you run in it — and their voice input — can hear you.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>omux needs the local network to reach the machines on it that your projects are set to run on.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>omux needs this folder to open the projects you keep there.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>omux needs this folder to open the projects you keep there.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>omux needs this folder to open the projects you keep there.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSServices</key>
