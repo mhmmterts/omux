@@ -23,6 +23,9 @@ struct ProjectRail: View {
     /// The tiles' margin: with the gutter after the strip, the same on both sides of a tile.
     static let inset: CGFloat = 11
     static let openWidth: CGFloat = 196
+    /// How long the pointer rests on the strip before the names slide out. Short enough not to
+    /// feel like a wait, long enough that crossing the strip on the way elsewhere leaves it shut.
+    static let hoverOpenDelay: TimeInterval = 0.12
 
     /// Pinned and active projects, in the sidebar's own order.
     private var active: [TabGroup] {
@@ -146,7 +149,7 @@ struct ProjectRail: View {
             hover += 1
             let turn = hover
             if over {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.hoverOpenDelay) {
                     if hover == turn { withAnimation(.easeOut(duration: 0.16)) { open = true } }
                 }
             } else {
