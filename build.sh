@@ -48,8 +48,9 @@ cp -R Resources/transcript "$APP/Contents/Resources/transcript"
 cp -R Resources/icons "$APP/Contents/Resources/icons"
 # The session host for other machines, when scripts/build-host.sh has built it: omux
 # installs it over SSH on a machine a project is set to run on.
-host_builds=(build/host/omux-host-linux-*.tar.xz)
-if (( ${#host_builds} )); then
+# An array, not ls: under null_glob an unmatched pattern vanishes and a bare ls succeeds.
+HOST_BUILDS=(build/host/omux-host-linux-*.tar.xz)
+if (( ${#HOST_BUILDS} )); then
   mkdir -p "$APP/Contents/Resources/host"
   cp build/host/omux-host-linux-*.tar.xz build/host/omux-host-linux-*.sha256 "$APP/Contents/Resources/host/"
 elif [[ "$MODE" == dist ]]; then
@@ -86,10 +87,9 @@ if [[ "$MODE" == "install" ]]; then
   # each other in /Applications without Accessibility, Screen Recording and folder grants
   # starting over; without it, the Apple Development certificate, then an ad-hoc signature.
   IDENTITIES=$(security find-identity -v -p codesigning 2>/dev/null || true)
-  # grep finds nothing when a certificate is absent: `|| true` keeps that from ending the
-  # run here, before anything is signed or installed.
-  IDENTITY=$(echo "$IDENTITIES" | grep "Developer ID Application" | head -1 | awk '{print $2}' || true)
-  [[ -z "$IDENTITY" ]] && IDENTITY=$(echo "$IDENTITIES" | grep "Apple Development" | head -1 | awk '{print $2}' || true)
+  # awk, not grep: a certificate that isn't there must fall through to the next, not fail under pipe_fail.
+  IDENTITY=$(echo "$IDENTITIES" | awk '/Developer ID Application/ && !found { print $2; found = 1 }')
+  [[ -z "$IDENTITY" ]] && IDENTITY=$(echo "$IDENTITIES" | awk '/Apple Development/ && !found { print $2; found = 1 }')
   if [[ -z "$IDENTITY" ]]; then
     echo "No Developer ID or Apple Development certificate: signing ad-hoc. macOS treats each" >&2
     echo "ad-hoc build as a new app, so Microphone, Accessibility and folder grants start over." >&2

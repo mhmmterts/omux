@@ -42,26 +42,45 @@ public final class SessionTranscript {
     public private(set) var totalOut = 0 { willSet { changing() } }
     public private(set) var lastContext: Int? { willSet { changing() } }
     public private(set) var lastModel: String? { willSet { changing() } }
-    /// Prompts sent from the panel this run, newest last; `history` adds the conversation's own.
-    private var sentPrompts: [String] = []
-    /// For ↑ in the compose box: the conversation's prompts in order, so a session that isn't
-    /// running or was opened after a relaunch still recalls its last prompt, then prompts sent
-    /// from the panel that the conversation doesn't hold (slash commands, ones not yet recorded).
-    public var history: [String] {
+    /// Prompts sent from the panel this run, newest last, each with how many prompts the
+    /// conversation held when it went out; `history` puts them in among the conversation's own.
+    private var sentPrompts: [(text: String, after: Int)] = []
+    /// The conversation's prompts in order.
+    private var conversationPrompts: [String] {
         var list: [String] = []
         for block in blocks where block.kind == .user && block.pending != .removed {
             let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty, list.last != text { list.append(text) }
         }
-        for text in sentPrompts where !list.contains(text) { list.append(text) }
-        return Array(list.suffix(100))
+        return list
+    }
+    /// For ↑ in the compose box: the conversation's prompts in order, so a session that isn't
+    /// running or was opened after a relaunch still recalls its last prompt, with prompts sent
+    /// from the panel that the conversation doesn't hold (slash commands, ones not yet recorded)
+    /// where they were sent: a command sent before the last message comes before it.
+    public var history: [String] {
+        let list = conversationPrompts
+        let extra = sentPrompts.filter { !list.contains($0.text) }
+        var merged: [String] = []
+        var next = 0
+        for (index, text) in list.enumerated() {
+            while next < extra.count, extra[next].after <= index { merged.append(extra[next].text); next += 1 }
+            merged.append(text)
+        }
+        merged += extra[next...].map(\.text)
+        return Array(merged.suffix(100))
     }
 
     /// A prompt or command sent from the panel, for ↑.
     public func remember(_ text: String) {
-        guard sentPrompts.last != text else { return }
-        sentPrompts.append(text)
+        guard sentPrompts.last?.text != text else { return }
+        sentPrompts.append((text, conversationPrompts.count))
         if sentPrompts.count > 100 { sentPrompts.removeFirst(sentPrompts.count - 100) }
+    }
+
+    /// Takes back the latest `remember`: a command a chip sent isn't something to recall with ↑.
+    public func forget(_ text: String) {
+        if sentPrompts.last?.text == text { sentPrompts.removeLast() }
     }
     /// For the summary strip: prompts so far, when the first one was sent, files edited.
     public private(set) var promptCount = 0 { willSet { changing() } }
@@ -108,6 +127,12 @@ public final class SessionTranscript {
     private var startAtEnd = false
     private var countedMessages: Set<String> = []
     private var imagesKept = 0
+    /// Echoes whose thumbnails are still being made, by block id, each with its decode's token
+    /// so the decode finds the echo after a Codex read moves it. A record that takes one sets
+    /// its own images.
+    private var awaitingThumbnails: [Int: UUID] = [:]
+    /// The newest thumbnail decode, so a test can wait for it to land.
+    private(set) var thumbnailWork: Task<Void, Never>?
     /// The note a slash command made, so the command's output can replace its text.
     private var commandNote: Int?
     private var loading = false
@@ -200,7 +225,7 @@ public final class SessionTranscript {
         loading = false
         url = nil; offset = 0; remainder = Data()
         running = []; takenEchoes = []; dequeues = 0; countedMessages = []; commandNote = nil
-        lastPrompt = nil
+        lastPrompt = nil; awaitingThumbnails = [:]
         var list = blocks
         for index in list.indices where list[index].kind == .user && list[index].pending != nil { list[index].pending = .removed }
         list.append(ChatBlock(id: next, kind: .note, text: "Continued with \(to.label)" + (from == .claude || from == .codex ? ", handed the conversation so far" : ""))); next += 1
@@ -222,7 +247,7 @@ public final class SessionTranscript {
         loading = false
         url = nil; offset = 0; remainder = Data()
         blocks = []; encoded = []; encodedBytes = 0; changeLog = []; trimmedUpTo = 0
-        toolRows = [:]; running = []; takenEchoes = []; dequeues = 0; countedMessages = []; imagesKept = 0; commandNote = nil; next = 0
+        toolRows = [:]; running = []; takenEchoes = []; dequeues = 0; countedMessages = []; imagesKept = 0; awaitingThumbnails = [:]; commandNote = nil; next = 0
         lastPrompt = nil; lastWrite = nil; totalOut = 0; lastContext = nil; lastModel = nil
         promptCount = 0; firstPrompt = nil; filesTouched = []
         truncated = false; notice = nil; loaded = false
@@ -295,7 +320,11 @@ public final class SessionTranscript {
     private func followNewConversation() {
         guard url != nil, let now = claudeFile(), now != url else { return }
         stopReading()
+        // A read of the old file still in flight is dropped when it lands.
+        generation += 1
+        loading = false
         url = now; offset = 0; remainder = Data()
+        watch(now)
         note("New conversation")
         startReading()
     }
@@ -421,6 +450,7 @@ public final class SessionTranscript {
                     list[first].text = text
                     list[first].time = time
                     list[first].images = keep(images)
+                    awaitingThumbnails[list[first].id] = nil
                     list[first].pending = nil
                     touched.insert(first)
                     lastPrompt = time
@@ -436,6 +466,7 @@ public final class SessionTranscript {
                     list[index].text = text
                     list[index].time = time
                     list[index].images = keep(images)
+                    awaitingThumbnails[list[index].id] = nil
                     list[index].pending = nil
                     touched.insert(index)
                     lastPrompt = time
@@ -723,13 +754,35 @@ public final class SessionTranscript {
             list.append(ChatBlock(id: next, kind: .note, text: "Worked for " + Self.duration(end.timeIntervalSince(start)))); next += 1
             lastPrompt = nil
         }
-        let inline = TranscriptParser.inlineImages(in: text)
-        var block = ChatBlock(id: next, kind: .user, text: inline.text, time: Date(), images: keep(inline.images))
+        let inline = TranscriptParser.inlineImages(in: text, thumbnails: false)
+        var block = ChatBlock(id: next, kind: .user, text: inline.text, time: Date())
         // "queuing" until Claude Code's own queue record confirms it; then it can be reordered.
         block.pending = queued ? .queuing : .sent
         list.append(block); next += 1
         commit(list, touched: [])
         Timing.mark("echo", tabID, queued ? "queued" : "sent")
+        // Image paths came out of the text: their thumbnails follow, made off the main thread.
+        if inline.text != text { addThumbnails(of: text, to: block) }
+    }
+
+    /// Decoding a screenshot takes a good part of a second: the bubble shows its text at once
+    /// and its images when they're ready. Once the agent's record has taken the block, its
+    /// images are the record's, as when the thumbnails came with the echo; a prompt absorbed
+    /// mid-turn has no record coming and keeps the echo's.
+    private func addThumbnails(of text: String, to echo: ChatBlock) {
+        let generation = generation, token = UUID()
+        awaitingThumbnails[echo.id] = token
+        thumbnailWork = Task.detached(priority: .userInitiated) {
+            let images = TranscriptParser.inlineImages(in: text).images
+            await MainActor.run {
+                guard self.generation == generation, let id = self.awaitingThumbnails.first(where: { $0.value == token })?.key else { return }
+                self.awaitingThumbnails[id] = nil
+                guard !images.isEmpty, self.blocks.indices.contains(id), self.blocks[id].kind == .user else { return }
+                var list = self.blocks
+                list[id].images = self.keep(images)
+                self.commit(list, touched: [id])
+            }
+        }
     }
 
     /// The waiting prompt a queue record names: the one with that text, newest first.
@@ -938,11 +991,15 @@ public final class SessionTranscript {
                     list.append(ChatBlock(id: list.count, kind: .assistant, text: live.text))
                     codexLiveBlock = list.count - 1
                 }
+                // Thumbnails still being made follow their echo to its new place.
+                var awaiting: [Int: UUID] = [:]
                 for echo in echoes {
                     var block = ChatBlock(id: list.count, kind: .user, text: echo.text, time: echo.time, images: echo.images)
                     block.pending = echo.pending
+                    awaiting[block.id] = awaitingThumbnails[echo.id]
                     list.append(block)
                 }
+                awaitingThumbnails = awaiting
                 if list != blocks {
                     // Items keep their place, so only the ones that changed are re-encoded.
                     var touched: Set<Int> = []

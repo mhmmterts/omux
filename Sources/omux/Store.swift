@@ -837,7 +837,8 @@ final class Store: ObservableObject {
                 // "Please restart Codex." Do that once, so the session doesn't sit in a shell.
                 if Self.asksForRestart(view.lastLines(8)), !codexRelaunched.contains(id) {
                     codexRelaunched.insert(id)
-                    start(id)
+                    // In the background: the session the user is in keeps the window.
+                    launch(id)
                 }
             }
             return
@@ -954,9 +955,6 @@ final class Store: ObservableObject {
         return found
     }
 
-    /// The transcript of the session's Claude Code conversation. The tab's own session id first;
-    /// else the id of the `claude` running in the terminal, which Claude Code records per process in
-    /// ~/.claude/sessions/<pid>.json. That covers a `claude` typed into a shell, or `claude --continue`.
     /// The ~/.claude/projects folder for the session's working directory, where its transcript
     /// and subagent folders appear. nil for a session without a folder.
     func claudeProjectFolderURL(for id: UUID) -> URL? {
@@ -967,28 +965,43 @@ final class Store: ObservableObject {
         return URL(fileURLWithPath: NSHomeDirectory() + "/.claude/projects/" + Self.claudeProjectFolder(for: folder))
     }
 
+    /// The transcript of the session's Claude Code conversation. The `claude` running in the
+    /// terminal first, which Claude Code records per process in ~/.claude/sessions/<pid>.json: that
+    /// follows a /clear, a `claude` typed into a shell, or `claude --continue`. Else the tab's own id.
     func claudeTranscriptURL(for id: UUID) -> URL? {
         guard let tab = tab(id) else { return nil }
-        if let url = Self.claudeTranscriptURL(tab.claudeSessionID.uuidString.lowercased()) { return url }
-        guard let view = terminals[id], !(runtime[id]?.exited ?? true) else { return nil }
-        let sessions = NSHomeDirectory() + "/.claude/sessions"
-        for pid in Self.descendants(of: view.process.shellPid) {
-            guard let data = FileManager.default.contents(atPath: "\(sessions)/\(pid).json"),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let session = object["sessionId"] as? String else { continue }
-            if let url = Self.claudeTranscriptURL(session.lowercased()) { return url }
+        var live: [String] = []
+        if let view = terminals[id], !(runtime[id]?.exited ?? true) {
+            let sessions = NSHomeDirectory() + "/.claude/sessions"
+            live = Self.descendants(of: view.process.shellPid).compactMap { pid in
+                guard let data = FileManager.default.contents(atPath: "\(sessions)/\(pid).json"),
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+                return (object["sessionId"] as? String)?.lowercased()
+            }
         }
-        return nil
+        return Self.claudeTranscriptURL(pinned: tab.claudeSessionID.uuidString.lowercased(), live: live, lookup: Self.claudeTranscriptURL)
     }
 
-    /// Starts the selected provider in an idle shell or resumes its exact saved chat.
+    /// The tab's own conversation, unless the running `claude` is on another one with a transcript.
+    static func claudeTranscriptURL(pinned: String, live: [String], lookup: (String) -> URL?) -> URL? {
+        for session in live { if let url = lookup(session) { return url } }
+        return lookup(pinned)
+    }
+
+    /// ▶: brings the session forward, so what it starts is what you're looking at, and starts it.
     func start(_ id: UUID) {
+        guard location(of: id) != nil, pendingCommands[id] == nil else { return }
+        selectedTabID = id
+        if let view = terminals[id] { view.window?.makeFirstResponder(view) }
+        launch(id)
+    }
+
+    /// Starts the selected provider in an idle shell or resumes its exact saved chat, leaving
+    /// the selection alone.
+    private func launch(_ id: UUID) {
         // Claude Code updates itself in place: a start is a good moment to learn its new models.
         ClaudeModels.shared.refresh()
         guard let loc = location(of: id), pendingCommands[id] == nil else { return }
-        // ▶ brings the session forward; what it starts should be what you're looking at.
-        selectedTabID = id
-        if let view = terminals[id] { view.window?.makeFirstResponder(view) }
         // ▶ in a plain shell turns it into an agent session, the one chosen in Settings.
         if groups[loc.group].tabs[loc.tab].resolvedProvider(in: groups[loc.group]) == .shell {
             let agent: SessionProvider = UserDefaults.standard.string(forKey: Prefs.playAgent) == "codex" ? .codex : .claude
