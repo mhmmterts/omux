@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // One compose box for a set of panes. No pane carries a box of its own: the one under them all
@@ -83,6 +84,10 @@ private struct TerminalComposeBar: View {
                 .font(.system(size: 13, design: .monospaced))
                 .focused($focused)
                 .onSubmit(submit)
+            Button(action: dictate) { Image(systemName: "mic") }
+                .buttonStyle(IconButtonStyle(size: 24))
+                .foregroundStyle(.secondary)
+                .help("Dictate into the message")
             Button(action: submit) {
                 Image(systemName: "arrow.up")
                     .font(.system(size: 12, weight: .bold))
@@ -101,6 +106,14 @@ private struct TerminalComposeBar: View {
         .padding(.horizontal, 12)
         .padding(.top, 6)
         .padding(.bottom, 12)
+    }
+
+    /// macOS dictation into the box, as the transcript's own compose box offers.
+    private func dictate() {
+        focused = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            NSApp.sendAction(Selector(("startDictation:")), to: nil, from: nil)
+        }
     }
 
     private func submit() {
