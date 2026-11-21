@@ -141,12 +141,12 @@ struct ProjectRail: View {
         // A click on the strip's own empty space stays here and doesn't reach the list under it.
         .onTapGesture {}
         .onHover { over in
-            // A good second's rest opens it: a click on a tile is the quick way, and the names
+            // A brief rest opens it: a click on a tile is still the quick way, and the names
             // are for when you stop to look.
             hover += 1
             let turn = hover
             if over {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
                     if hover == turn { withAnimation(.easeOut(duration: 0.16)) { open = true } }
                 }
             } else {
