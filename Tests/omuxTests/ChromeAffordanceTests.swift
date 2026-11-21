@@ -489,3 +489,21 @@ final class TerminalDictationButtonKnowsTheAgentTests: XCTestCase {
         XCTAssertFalse(running(runtime))
     }
 }
+
+/// The microphone is a target for a pointer, not a decoration.
+final class TerminalDictationButtonSizeTests: XCTestCase {
+    @MainActor
+    func testItIsBigEnoughToHitAndSquare() {
+        let term = TermView(tabID: UUID())
+        let container = TerminalHost.Container(frame: .zero)
+        container.addSubview(term)
+        let button = TerminalDictationButton(term: term)
+        container.addSubview(button)
+        container.frame = NSRect(x: 0, y: 0, width: 900, height: 600)
+
+        XCTAssertGreaterThanOrEqual(TerminalDictationButton.size, 28, "a smaller button is fiddly to hit")
+        XCTAssertEqual(button.frame.width, button.frame.height, "square, like the window's other buttons")
+        let corner = button.convert(CGPoint(x: button.bounds.minX + 2, y: button.bounds.minY + 2), to: container)
+        XCTAssertTrue(container.hitTest(corner) === button, "its whole face takes the click")
+    }
+}

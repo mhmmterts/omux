@@ -586,7 +586,10 @@ final class TerminalScrollbar: NSView {
 /// the program's screen, so the button floats above it and hands the program macOS dictation:
 /// what you say is typed into whatever has the keyboard, which is that input line.
 final class TerminalDictationButton: NSView {
-    static let size: CGFloat = 24
+    static let size: CGFloat = 30
+    /// A rounded square, like the window's other small buttons, and large enough to hit
+    /// without aiming.
+    private static let corner: CGFloat = 8
     /// Clear of the window's own rounded corner and of the scrollbar beside it.
     static let inset: CGFloat = 6
 
@@ -621,14 +624,14 @@ final class TerminalDictationButton: NSView {
     override func mouseExited(with event: NSEvent) { hovering = false; needsDisplay = true }
 
     override func draw(_ dirtyRect: NSRect) {
-        let circle = bounds.insetBy(dx: 1, dy: 1)
+        let face = bounds.insetBy(dx: 1, dy: 1)
         if listening {
             NSColor.systemRed.withAlphaComponent(0.22).setFill()
         } else {
             NSColor.labelColor.withAlphaComponent(hovering ? 0.16 : 0.08).setFill()
         }
-        NSBezierPath(ovalIn: circle).fill()
-        let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+        NSBezierPath(roundedRect: face, xRadius: Self.corner, yRadius: Self.corner).fill()
+        let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
         guard let mic = NSImage(systemSymbolName: listening ? "waveform" : "mic", accessibilityDescription: "Dictate")?
             .withSymbolConfiguration(config) else { return }
         let strength: CGFloat = hovering ? 0.9 : 0.55
