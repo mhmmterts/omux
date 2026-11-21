@@ -468,6 +468,11 @@ final class Store: ObservableObject {
             "TERM": "xterm-256color",
             "COLORTERM": "truecolor",
             "TERM_PROGRAM": "omux",
+            // Claude Code draws on the alternate screen by default, which keeps no scrollback:
+            // the window then has nothing to scroll and no honest scrollbar can be drawn over
+            // it. Asked not to, it writes into the terminal's own buffer, where the
+            // conversation is the terminal's to scroll — as it is in any other program.
+            "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         ]
         if let enc = inherited["__CF_USER_TEXT_ENCODING"] { env["__CF_USER_TEXT_ENCODING"] = enc }
         env.merge(cliEnvironment(for: tab.id, path: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")) { $1 }
