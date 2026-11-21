@@ -308,6 +308,7 @@ struct TabRow: View {
     @ObservedObject private var monitor = AgentMonitor.shared
     @ObservedObject private var pulls = PullRequestMonitor.shared
     @ObservedObject private var diffStats = DiffStatMonitor.shared
+    @ObservedObject private var cacheNotes = SessionCacheMonitor.shared
     let tab: TabItem
     @State private var pointerOver = false
     @Environment(\.hoverBlocked) private var hoverBlocked
@@ -379,6 +380,16 @@ struct TabRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                }
+                // What opening this session again will cost before it has said anything: the
+                // conversation goes back to the model in full, and once its cached copy has
+                // expired that is paid for again.
+                if !compact, let note = cacheNotes.note(for: tab.id, transcript: store.claudeTranscriptURL(for: tab.id)) {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(2)
+                        .help("Every message sends the whole conversation. While it is cached that is cheap; after an hour idle the next message writes it to the cache again.")
                 }
                 if rt.awaitsPermission {
                     PermissionButtons(tabID: tab.id).padding(.top, 3)
