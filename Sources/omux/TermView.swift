@@ -84,6 +84,13 @@ final class TermView: LocalProcessTerminalView {
         // stays Meta only on keys with no character: arrows, ⌥⏎, ⌥⌫, Escape, Tab.
         optionAsMetaKey = false
         optionAsMetaKeyForFunctionalKeys = true
+        // A terminal's lines are short, so a wheel notch that moves three of them covers as
+        // much as one does in a document. At 1.0, a flick through a session's output crawls.
+        scrollSensitivity = 3.0
+        // A scrollbar that stays on the right, with a knob you can drag or click past, the way
+        // a page has one: the overlay scroller only appeared while the wheel was moving, which
+        // is no use for getting quickly from one end of a long session to the other.
+        scrollerStyle = .legacy
         apply(Theme.current)
         registerForDraggedTypes([.fileURL, .png, .tiff] + NSFilePromiseReceiver.readableDraggedTypes.map { NSPasteboard.PasteboardType($0) })
         // Observed, not handled, so SwiftTerm keeps drawing OSC 9;4 progress itself.
