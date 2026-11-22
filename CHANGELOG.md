@@ -2,6 +2,14 @@
 
 All notable changes to omux are listed here. Versions follow [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Added
+- **Open Recent Conversation says how large each conversation is,** beside its date: what it came to when it was last sent, so an expensive one is recognisable before it is opened. A row is named after the first thing typed in it, which says nothing about what picking it up again would cost.
+
+### Fixed
+- **A session follows the conversation it is actually on.** A /clear, "Start a new conversation" at Claude Code's cold-resume question, or a `claude --continue` typed into the shell leaves the terminal on a new conversation. The session stayed pinned to the old one, so the sidebar measured the conversation left behind, restarting the session went back to it instead of the one you had been talking to, and picking the old one out of Open Recent Conversation jumped to a session showing something else. The conversation left behind keeps its transcript and stays in the list.
+
 ## [0.12.5] - 2026-11-21
 
 ### Added

@@ -387,6 +387,7 @@ struct RecentSessionsSheet: View {
     @State private var loaded = false
     @State private var query = ""
     @State private var byFolder = false
+    @State private var sizes: [UUID: Int] = [:]
     @State private var provider = SessionProvider.claude
     @State private var error: String?
     @FocusState private var focused: Bool
@@ -467,7 +468,7 @@ struct RecentSessionsSheet: View {
         .onExitCommand { dismiss() }
         .task(id: provider) {
             focused = true
-            loaded = false; error = nil; sessions = []
+            loaded = false; error = nil; sessions = []; sizes = [:]
             do {
                 let result: [RecentConversation]
                 if provider == .codex {
@@ -477,6 +478,14 @@ struct RecentSessionsSheet: View {
                 }
                 guard !Task.isCancelled else { return }
                 sessions = result; loaded = true
+                // The sizes come after the list: reading the end of every transcript takes
+                // longer than naming them, and the rows are usable without it.
+                let ids: [UUID] = result.compactMap { if case .claude(let recent) = $0 { return recent.id } else { return nil } }
+                let found = await Task.detached {
+                    RecentSessionSize.tokens(of: ids, transcript: { Store.claudeTranscriptURL($0.uuidString.lowercased()) })
+                }.value
+                guard !Task.isCancelled else { return }
+                sizes = found
             } catch {
                 guard !Task.isCancelled else { return }
                 self.error = error.localizedDescription; loaded = true
@@ -497,6 +506,10 @@ struct RecentSessionsSheet: View {
                 HStack {
                     if showFolder { Text(session.folder) }
                     Spacer()
+                    if case .claude(let recent) = session, let tokens = sizes[recent.id] {
+                        Text("\(SessionCacheNote.tokenText(tokens)) tokens")
+                            .help("What this conversation came to when it was last sent. Picking it up again sends it all, unless Claude Code offers a summary instead.")
+                    }
                     Text(session.date, format: .relative(presentation: .named))
                 }
                 .font(.caption)

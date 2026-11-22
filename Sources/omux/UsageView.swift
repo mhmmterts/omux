@@ -70,7 +70,7 @@ struct UsageView: View {
                             Text(limit.label).foregroundStyle(.secondary)
                             Text("\(limit.percent)%")
                                 .fontWeight(.medium)
-                                .foregroundStyle(limit.percent >= 90 ? Palette.error : limit.percent >= 70 ? Palette.needs : .primary.opacity(0.85))
+                                .foregroundStyle(limit.numberTint)
                             if let reset = limit.resetShort { Text(reset).foregroundStyle(.tertiary) }
                         }
                     }
@@ -117,7 +117,7 @@ struct UsageView: View {
                         .frame(height: 3)
                         Text("\(limit.percent)%")
                             .fontWeight(.medium)
-                            .foregroundStyle(limit.percent >= 90 ? Palette.error : limit.percent >= 70 ? Palette.needs : .primary.opacity(0.85))
+                            .foregroundStyle(limit.numberTint)
                             .frame(width: 28, alignment: .trailing)
                         Text(limit.resetShort ?? "")
                             .foregroundStyle(.tertiary)

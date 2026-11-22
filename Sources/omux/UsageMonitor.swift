@@ -10,9 +10,24 @@ final class UsageMonitor: ObservableObject {
         let label: String
         let percent: Int
         let resetsAt: Date?
+        /// Which window this is, as the service names it: "session" for the five hours,
+        /// "weekly_all" for the week. Empty for a limit that has no such name.
+        var kind: String = ""
 
+        /// A colour for the window, not for how full it is. The five-hour window comes back
+        /// a few times a day, so it reads as the ordinary one and is green; the week is the
+        /// one you can actually run out of, and stays red.
         var tint: Color {
-            percent >= 90 ? Palette.error : percent >= 70 ? Palette.needs : Palette.quiet
+            if kind == "session" { return Palette.done }
+            if kind.hasPrefix("weekly") { return Palette.error }
+            return percent >= 90 ? Palette.error : percent >= 70 ? Palette.needs : Palette.quiet
+        }
+
+        /// The colour for the figure beside the ring: the window's own, except where there
+        /// is none to go by — then it stays quiet until the limit is worth noticing.
+        var numberTint: Color {
+            if kind == "session" || kind.hasPrefix("weekly") { return tint }
+            return percent >= 90 ? Palette.error : percent >= 70 ? Palette.needs : .primary.opacity(0.85)
         }
 
         /// "2h 14m", "3d 4h": how long until this limit starts over.
@@ -136,7 +151,8 @@ final class UsageMonitor: ObservableObject {
                 return Limit(id: entry.kind + (entry.scope?.model?.display_name ?? ""),
                              label: label,
                              percent: entry.percent,
-                             resetsAt: entry.resets_at.flatMap { iso.date(from: $0) })
+                             resetsAt: entry.resets_at.flatMap { iso.date(from: $0) },
+                             kind: entry.kind)
             }
             error = nil; detail = nil
         } catch {

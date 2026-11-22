@@ -95,3 +95,63 @@ final class SessionCacheNoteTests: XCTestCase {
         XCTAssertEqual(SessionCacheNote.reading(ofTranscriptAt: url)?.contextTokens, 711_000)
     }
 }
+
+/// The sidebar has a column's width for this, not a sentence's.
+final class SessionCacheShortLabelTests: XCTestCase {
+    private let noon = ISO8601DateFormatter().date(from: "2026-11-21T12:00:00Z")!
+    private func reading(_ tokens: Int, idleFor: TimeInterval) -> SessionCacheNote.Reading {
+        .init(contextTokens: tokens, at: noon.addingTimeInterval(-idleFor), ttl: "1h")
+    }
+
+    func testItFitsARow() {
+        let label = SessionCacheNote.shortLabel(for: reading(711_000, idleFor: 3 * 86_400 + 23 * 3600), now: noon)
+        XCTAssertEqual(label, "idle 3d 23h · 711k to re-cache")
+        XCTAssertLessThanOrEqual(label!.count, 34, "a sidebar column cuts off more than this")
+    }
+
+    func testAWarmCacheShowsNothingAtAll() {
+        XCTAssertNil(SessionCacheNote.shortLabel(for: reading(711_000, idleFor: 30 * 60), now: noon),
+                     "while the conversation is still cached there is nothing to say")
+    }
+
+    func testWithoutACountItStillSaysTheCacheWentCold() {
+        XCTAssertEqual(SessionCacheNote.shortLabel(for: reading(0, idleFor: 2 * 3600), now: noon),
+                       "idle 2h 0m · cache expired")
+    }
+
+    func testTheSentenceIsStillThereForTheTooltip() {
+        let cold = reading(222_000, idleFor: 2 * 86_400)
+        XCTAssertEqual(SessionCacheNote.note(for: cold, now: noon),
+                       "Idle 2d 0h. The prompt cache has likely expired, so your next message will re-cache about 222k tokens.")
+    }
+}
+
+/// The usage rings say which window they are, not how alarming the figure is: the five hours
+/// come round several times a day, the week is the one you can run out of.
+final class UsageLimitColourTests: XCTestCase {
+    private func limit(kind: String, percent: Int) -> UsageMonitor.Limit {
+        .init(id: kind, label: kind, percent: percent, resetsAt: nil, kind: kind)
+    }
+
+    func testTheFiveHourWindowIsGreenHoweverFullItIs() {
+        for percent in [3, 50, 78, 95] {
+            XCTAssertEqual(limit(kind: "session", percent: percent).tint, Palette.done)
+            XCTAssertEqual(limit(kind: "session", percent: percent).numberTint, Palette.done,
+                           "the figure beside the ring wears the same colour")
+        }
+    }
+
+    func testTheWeekStaysRed() {
+        for percent in [3, 78, 95] {
+            XCTAssertEqual(limit(kind: "weekly_all", percent: percent).tint, Palette.error)
+            XCTAssertEqual(limit(kind: "weekly_all", percent: percent).numberTint, Palette.error)
+        }
+    }
+
+    func testAWindowWithNoNameStillWarnsByHowFullItIs() {
+        // Codex's limits, and any per-model limit, have no such kind to go by.
+        XCTAssertEqual(limit(kind: "", percent: 20).tint, Palette.quiet)
+        XCTAssertEqual(limit(kind: "", percent: 75).tint, Palette.needs)
+        XCTAssertEqual(limit(kind: "", percent: 95).tint, Palette.error)
+    }
+}

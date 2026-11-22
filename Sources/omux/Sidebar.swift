@@ -385,12 +385,12 @@ struct TabRow: View {
                 // What opening this session again will cost before it has said anything: the
                 // conversation goes back to the model in full, and once its cached copy has
                 // expired that is paid for again.
-                if !compact, let note = cacheNotes.note(for: tab.id, transcript: store.claudeTranscriptURL(for: tab.id)) {
-                    Text(note)
+                if !compact, let cache = cacheNotes.label(for: tab.id, transcript: store.claudeTranscriptURL(for: tab.id)) {
+                    Text(cache.short)
                         .font(.caption)
                         .foregroundStyle(.tertiary)
-                        .lineLimit(2)
-                        .help("Every message sends the whole conversation. While it is cached that is cheap; after an hour idle the next message writes it to the cache again.")
+                        .lineLimit(1)
+                        .help(cache.full)
                 }
                 if rt.awaitsPermission {
                     PermissionButtons(tabID: tab.id).padding(.top, 3)

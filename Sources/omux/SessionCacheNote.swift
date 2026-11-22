@@ -54,6 +54,14 @@ enum SessionCacheNote {
         return "Idle \(idleText(idle)). The prompt cache has likely expired, so your next message will re-cache \(what)."
     }
 
+    /// The same thing in the few words a sidebar row has for it. The sentence goes in the
+    /// tooltip: a column this narrow would cut it off mid-word.
+    static func shortLabel(for reading: Reading?, now: Date = Date()) -> String? {
+        guard case let .cold(idle, tokens) = state(for: reading, now: now) else { return nil }
+        guard let tokens else { return "idle \(idleText(idle)) · cache expired" }
+        return "idle \(idleText(idle)) · \(tokenText(tokens)) to re-cache"
+    }
+
     /// "3d 23h", "2h 5m", "14m" — the two largest units, as the agent's own editors say it.
     static func idleText(_ idle: TimeInterval) -> String {
         let minutes = max(0, Int(idle / 60))
@@ -125,11 +133,24 @@ final class SessionCacheMonitor: ObservableObject {
     private let interval: TimeInterval = 30
     private let queue = DispatchQueue(label: "net.pf1.omux.cache-note", qos: .utility)
 
+    /// The short label and the sentence behind it, asking for a fresh reading when one is due.
+    func label(for id: UUID, transcript: @autoclosure () -> URL?) -> (short: String, full: String)? {
+        refreshIfDue(id, transcript())
+        guard let short = SessionCacheNote.shortLabel(for: readings[id]),
+              let full = SessionCacheNote.note(for: readings[id]) else { return nil }
+        return (short, full)
+    }
+
     /// The note for a session, asking for a fresh reading when one is due.
     func note(for id: UUID, transcript: @autoclosure () -> URL?) -> String? {
+        refreshIfDue(id, transcript())
+        return SessionCacheNote.note(for: readings[id])
+    }
+
+    private func refreshIfDue(_ id: UUID, _ url: URL?) {
         if !reading.contains(id), Date().timeIntervalSince(lookedAt[id] ?? .distantPast) > interval {
             lookedAt[id] = Date()
-            if let url = transcript() {
+            if let url {
                 reading.insert(id)
                 queue.async { [weak self] in
                     let found = SessionCacheNote.reading(ofTranscriptAt: url)
@@ -141,6 +162,24 @@ final class SessionCacheMonitor: ObservableObject {
                 }
             }
         }
-        return SessionCacheNote.note(for: readings[id])
+    }
+}
+
+/// How large each conversation grew, for a list that has only their first messages to go on.
+///
+/// Open Recent Conversation names a row by the first thing typed in it, which says nothing about
+/// what picking it up again would send. The size comes from the end of each transcript, the same
+/// reading the sidebar's cache note is built on.
+enum RecentSessionSize {
+    /// The last turn's size per conversation, leaving out the ones whose transcript doesn't say.
+    static func tokens(of sessions: [UUID], transcript: (UUID) -> URL?) -> [UUID: Int] {
+        var found: [UUID: Int] = [:]
+        for session in sessions {
+            guard let url = transcript(session),
+                  let reading = SessionCacheNote.reading(ofTranscriptAt: url),
+                  reading.contextTokens > 0 else { continue }
+            found[session] = reading.contextTokens
+        }
+        return found
     }
 }

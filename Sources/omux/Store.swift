@@ -170,6 +170,9 @@ final class Store: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 for (id, rt) in self.runtime where rt.provider == .codex && rt.agentConnected && !rt.exited { self.refreshBusy(id) }
+                // And Claude Code leaves no trace either when the conversation under the session
+                // changes: the tab follows what the terminal is on.
+                for (id, rt) in self.runtime where rt.provider == .claude && !rt.exited { self.adoptLiveClaudeSession(id) }
             }
         }
         CodexManager.shared.onStatus = { [weak self] id, status in
@@ -970,22 +973,56 @@ final class Store: ObservableObject {
     /// follows a /clear, a `claude` typed into a shell, or `claude --continue`. Else the tab's own id.
     func claudeTranscriptURL(for id: UUID) -> URL? {
         guard let tab = tab(id) else { return nil }
-        var live: [String] = []
-        if let view = terminals[id], !(runtime[id]?.exited ?? true) {
-            let sessions = NSHomeDirectory() + "/.claude/sessions"
-            live = Self.descendants(of: view.process.shellPid).compactMap { pid in
-                guard let data = FileManager.default.contents(atPath: "\(sessions)/\(pid).json"),
-                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-                return (object["sessionId"] as? String)?.lowercased()
-            }
+        return Self.claudeTranscriptURL(pinned: tab.claudeSessionID.uuidString.lowercased(),
+                                        live: liveClaudeSessions(for: id), lookup: Self.claudeTranscriptURL)
+    }
+
+    /// The conversations the `claude` processes under the session's shell are on, newest process
+    /// first. Empty when nothing is running there: then only the tab's own id is left to go on.
+    private func liveClaudeSessions(for id: UUID) -> [String] {
+        guard let view = terminals[id], !(runtime[id]?.exited ?? true) else { return [] }
+        let sessions = NSHomeDirectory() + "/.claude/sessions"
+        return Self.descendants(of: view.process.shellPid).compactMap { pid in
+            guard let data = FileManager.default.contents(atPath: "\(sessions)/\(pid).json"),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            return (object["sessionId"] as? String)?.lowercased()
         }
-        return Self.claudeTranscriptURL(pinned: tab.claudeSessionID.uuidString.lowercased(), live: live, lookup: Self.claudeTranscriptURL)
+    }
+
+    /// The conversation a session is on: the running `claude`'s own once it has a transcript to
+    /// show, else the one the tab is pinned to.
+    static func effectiveClaudeSession(pinned: String, live: [String], hasTranscript: (String) -> Bool) -> String {
+        for session in live where hasTranscript(session) { return session }
+        return pinned
     }
 
     /// The tab's own conversation, unless the running `claude` is on another one with a transcript.
     static func claudeTranscriptURL(pinned: String, live: [String], lookup: (String) -> URL?) -> URL? {
-        for session in live { if let url = lookup(session) { return url } }
-        return lookup(pinned)
+        lookup(effectiveClaudeSession(pinned: pinned, live: live, hasTranscript: { lookup($0) != nil }))
+    }
+
+    /// Follows the conversation the terminal is actually on. Claude Code's id changes under the
+    /// session: a /clear, "Start a new conversation" at a cold resume, or a `claude --continue`
+    /// typed into the shell all leave it on a conversation the tab was never pinned to. Until the
+    /// tab follows, the sidebar measures the conversation left behind and a restart goes back to
+    /// it. The one left behind keeps its transcript and stays in Open Recent Conversation.
+    func adoptLiveClaudeSession(_ id: UUID) {
+        guard let tab = tab(id), provider(of: tab) == .claude else { return }
+        let pinned = tab.claudeSessionID.uuidString.lowercased()
+        let live = Self.effectiveClaudeSession(pinned: pinned, live: liveClaudeSessions(for: id),
+                                               hasTranscript: { Self.claudeTranscriptURL($0) != nil })
+        guard live != pinned, let adopted = UUID(uuidString: live) else { return }
+        updateTab(id) { $0.claudeSessionID = adopted }
+        save()
+    }
+
+    /// Whether a session is on this conversation now — not merely pinned to it, which is what a
+    /// /clear leaves behind.
+    func isOnClaudeConversation(_ session: UUID, in tab: TabItem) -> Bool {
+        Self.effectiveClaudeSession(pinned: tab.claudeSessionID.uuidString.lowercased(),
+                                    live: liveClaudeSessions(for: tab.id),
+                                    hasTranscript: { Self.claudeTranscriptURL($0) != nil })
+            == session.uuidString.lowercased()
     }
 
     /// ▶: brings the session forward, so what it starts is what you're looking at, and starts it.
@@ -1170,7 +1207,9 @@ final class Store: ObservableObject {
 
     /// Opens an existing Claude conversation as a session in the project for its folder.
     func openClaudeSession(_ recent: RecentSession) {
-        if let existing = allTabs.first(where: { $0.tab.claudeSessionID == recent.id && provider(of: $0.tab) == .claude }) {
+        // Pinned to it is not enough: a session that has since been cleared still carries the
+        // old id until it next ticks, and jumping to it would show a different conversation.
+        if let existing = allTabs.first(where: { provider(of: $0.tab) == .claude && isOnClaudeConversation(recent.id, in: $0.tab) }) {
             selectedTabID = existing.tab.id
             return
         }
