@@ -40,4 +40,89 @@ final class LiveClaudeSessionTests: XCTestCase {
         XCTAssertNotEqual(effective([cleared], have: [pinned, cleared]), pinned)
         XCTAssertEqual(effective([cleared], have: [pinned, cleared]), cleared)
     }
+
+    // MARK: - Finding the conversation when the process tree cannot say
+
+    private func record(_ pid: Int32, _ session: String, cwd: String? = nil, at: Double = 0,
+                        spare: Bool = false) -> Store.ClaudeSessionRecord {
+        Store.ClaudeSessionRecord(pid: pid, session: session, cwd: cwd, updatedAt: at, spare: spare)
+    }
+
+    /// Every process in these tests is running unless a test says otherwise.
+    private func live(_ records: [Store.ClaudeSessionRecord], descendants: Set<Int32> = [],
+                      cwd: String? = "/work", pinnedElsewhere: Set<String> = [],
+                      running: @escaping (Int32) -> Bool = { _ in true }) -> [String] {
+        Store.liveClaudeSessionIDs(records: records, descendants: descendants, cwd: cwd,
+                                   pinnedElsewhere: pinnedElsewhere, isRunning: running)
+    }
+
+    func testASpareTheDaemonHasNotHandedOutIsNotAConversation() {
+        let records = [record(10, "unclaimed-spare", cwd: "/work", at: 300, spare: true),
+                       record(11, "the-real-one", cwd: "/work", at: 200)]
+        XCTAssertEqual(live(records), ["the-real-one"], "a spare is newer and still not the answer")
+        XCTAssertEqual(live(records, descendants: [10, 11]), ["the-real-one"],
+                       "not even when it runs under the session's own shell")
+    }
+
+    func testTheRecordOfAProcessThatHasGoneIsIgnored() {
+        let records = [record(10, "left-behind", cwd: "/work", at: 300),
+                       record(11, "still-here", cwd: "/work", at: 200)]
+        XCTAssertEqual(live(records, running: { $0 != 10 }), ["still-here"])
+        XCTAssertEqual(live(records, descendants: [10], running: { $0 != 10 }), ["still-here"],
+                       "a dead process under the shell doesn't shadow a living one")
+    }
+
+    func testAClaudeUnderTheSessionsOwnShellIsTheAnswer() {
+        let records = [record(10, "under-the-shell", cwd: "/work", at: 1),
+                       record(99, "someone-elses", cwd: "/work", at: 9)]
+        XCTAssertEqual(live(records, descendants: [10]),
+                       ["under-the-shell"], "the process tree is certain; a newer record elsewhere doesn't outrank it")
+    }
+
+    /// Claude Code hands the terminal a process the daemon spawned, which belongs to launchd:
+    /// nothing under the shell reports a conversation, and the tab used to stay pinned to the one
+    /// it started on, so a restart reopened a conversation that had stopped growing.
+    func testWithNothingUnderTheShellTheFoldersNewestRecordAnswers() {
+        let records = [record(10, "older", cwd: "/work", at: 100),
+                       record(11, "newest", cwd: "/work", at: 300),
+                       record(12, "middle", cwd: "/work", at: 200),
+                       record(13, "other-folder", cwd: "/elsewhere", at: 999)]
+        XCTAssertEqual(live(records), ["newest", "middle", "older"], "the session's own folder, newest first")
+    }
+
+    func testAConversationAnotherTabIsPinnedToIsLeftAlone() {
+        let records = [record(10, "another-tabs", cwd: "/work", at: 300),
+                       record(11, "mine", cwd: "/work", at: 200)]
+        XCTAssertEqual(live(records, pinnedElsewhere: ["another-tabs"]),
+                       ["mine"], "two sessions in one folder don't steal each other's conversation")
+    }
+
+    func testWithoutAFolderThereIsNothingToGoOn() {
+        let records = [record(10, "somewhere", cwd: "/work", at: 1)]
+        XCTAssertEqual(live(records, cwd: nil), [])
+        XCTAssertEqual(live(records, cwd: ""), [])
+        XCTAssertEqual(live([], descendants: [10]), [])
+    }
+
+    /// Reading what Claude Code actually writes, rather than a shape we assumed.
+    func testTheRecordsAreReadFromClaudeCodesOwnFiles() throws {
+        let folder = NSTemporaryDirectory() + "sessions-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: folder) }
+        let real = """
+        {"pid":10447,"sessionId":"AA3FF073-7B83-4E53-8497-4E2424","cwd":"/Users/me/project",\
+        "kind":"bg","updatedAt":1795475397943,"status":"busy"}
+        """.replacingOccurrences(of: "\\\n", with: "")
+        try real.write(toFile: folder + "/10447.json", atomically: true, encoding: .utf8)
+        try "not json".write(toFile: folder + "/broken.json", atomically: true, encoding: .utf8)
+        try "{}".write(toFile: folder + "/12.json", atomically: true, encoding: .utf8)
+        try "ignored".write(toFile: folder + "/10447.key", atomically: true, encoding: .utf8)
+
+        let records = Store.claudeSessionRecords(in: folder)
+        XCTAssertEqual(records.count, 1, "a record without a conversation, and anything unreadable, is skipped")
+        XCTAssertEqual(records.first?.pid, 10447)
+        XCTAssertEqual(records.first?.session, "aa3ff073-7b83-4e53-8497-4e2424", "ids compare in one case")
+        XCTAssertEqual(records.first?.cwd, "/Users/me/project")
+        XCTAssertEqual(records.first?.updatedAt, 1795475397943)
+    }
 }

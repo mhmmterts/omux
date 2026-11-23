@@ -983,16 +983,71 @@ final class Store: ObservableObject {
                                         live: liveClaudeSessions(for: id), lookup: Self.claudeTranscriptURL)
     }
 
-    /// The conversations the `claude` processes under the session's shell are on, newest process
-    /// first. Empty when nothing is running there: then only the tab's own id is left to go on.
+    /// One of Claude Code's own session records: which conversation a process is on, and where.
+    struct ClaudeSessionRecord: Equatable {
+        var pid: pid_t
+        var session: String
+        var cwd: String?
+        var updatedAt: Double
+        /// A process the daemon spawned ahead of time and nobody has claimed. It carries a
+        /// conversation id and a folder like any other, and holds neither.
+        var spare = false
+    }
+
+    /// Every session record Claude Code has written, whatever process owns it.
+    static func claudeSessionRecords(in folder: String = NSHomeDirectory() + "/.claude/sessions") -> [ClaudeSessionRecord] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? []
+        return names.filter { $0.hasSuffix(".json") }.compactMap { name in
+            guard let data = FileManager.default.contents(atPath: folder + "/" + name),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let session = (object["sessionId"] as? String)?.lowercased() else { return nil }
+            let pid = (object["pid"] as? Int).map { pid_t($0) } ?? pid_t(name.dropLast(5)) ?? 0
+            return ClaudeSessionRecord(pid: pid, session: session, cwd: object["cwd"] as? String,
+                                       updatedAt: (object["updatedAt"] as? Double) ?? 0,
+                                       spare: (object["spare"] as? Bool) ?? false)
+        }
+    }
+
+    /// The conversations a session could be on, likeliest first.
+    ///
+    /// A `claude` under the session's own shell is the certain answer, and used to be the only
+    /// one. Claude Code now hands the terminal a process the daemon spawned beforehand, which
+    /// belongs to launchd rather than to the shell, so the certain answer is often missing and
+    /// the tab would stay pinned to a conversation that stopped growing — a restart then reopens
+    /// that one instead of what is on screen. Where the process tree says nothing, the records
+    /// for the session's own folder answer instead, newest first, leaving out conversations that
+    /// another tab is already pinned to.
+    static func liveClaudeSessionIDs(records allRecords: [ClaudeSessionRecord], descendants: Set<pid_t>,
+                                     cwd: String?, pinnedElsewhere: Set<String>,
+                                     isRunning: (pid_t) -> Bool = Store.isRunning) -> [String] {
+        // A record outlives the process that wrote it, and a spare holds no conversation.
+        let records = allRecords.filter { !$0.spare && isRunning($0.pid) }
+        let own = records.filter { descendants.contains($0.pid) }
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .map(\.session)
+        guard own.isEmpty else { return own }
+        guard let cwd, !cwd.isEmpty else { return [] }
+        return records.filter { $0.cwd == cwd && !pinnedElsewhere.contains($0.session) }
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .map(\.session)
+    }
+
+    /// Whether a process is still there. A session record is left behind when one isn't.
+    static func isRunning(_ pid: pid_t) -> Bool {
+        guard pid > 0 else { return false }
+        return Darwin.kill(pid, 0) == 0 || errno == EPERM
+    }
+
+    /// The conversations the session's `claude` is on, newest first. Empty when nothing is
+    /// running there: then only the tab's own id is left to go on.
     private func liveClaudeSessions(for id: UUID) -> [String] {
         guard let view = terminals[id], !(runtime[id]?.exited ?? true) else { return [] }
-        let sessions = NSHomeDirectory() + "/.claude/sessions"
-        return Self.descendants(of: view.process.shellPid).compactMap { pid in
-            guard let data = FileManager.default.contents(atPath: "\(sessions)/\(pid).json"),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-            return (object["sessionId"] as? String)?.lowercased()
-        }
+        let elsewhere = Set(allTabs.filter { $0.tab.id != id }
+            .map { $0.tab.claudeSessionID.uuidString.lowercased() })
+        return Self.liveClaudeSessionIDs(records: Self.claudeSessionRecords(),
+                                         descendants: Set(Self.descendants(of: view.process.shellPid)),
+                                         cwd: runtime[id]?.cwd ?? tab(id).flatMap(directory(of:)),
+                                         pinnedElsewhere: elsewhere)
     }
 
     /// The conversation a session is on: the running `claude`'s own once it has a transcript to
