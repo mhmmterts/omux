@@ -407,8 +407,12 @@ final class Store: ObservableObject {
 
     func removeFromSplit(_ id: UUID) {
         guard let current = layout(near: id) else { return }
+        // Before the pane goes, find what takes its place on screen: closing the pane you are in
+        // must leave the pane beside it, not the session just closed filling the whole area.
+        let next = current.neighbour(of: id)
         setLayout(current.removing(id), near: id)
         if maximizedID == id { maximizedID = nil }
+        if selectedTabID == id, let next { selectedTabID = next }
     }
 
     /// Evens out the selected project's panes.
@@ -471,12 +475,14 @@ final class Store: ObservableObject {
             "TERM": "xterm-256color",
             "COLORTERM": "truecolor",
             "TERM_PROGRAM": "omux",
-            // Claude Code draws on the alternate screen by default, which keeps no scrollback:
-            // the window then has nothing to scroll and no honest scrollbar can be drawn over
-            // it. Asked not to, it writes into the terminal's own buffer, where the
-            // conversation is the terminal's to scroll — as it is in any other program.
-            "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         ]
+        // Claude Code draws on the alternate screen by default, which keeps no scrollback: the
+        // window then has nothing to scroll and no honest scrollbar can be drawn over it. Asked
+        // not to, it writes into the terminal's own buffer, where the conversation is the
+        // terminal's to scroll — but it also stops drawing the request it holds at the top of
+        // the view and its Jump to bottom, which are part of that full-screen layout. Which of
+        // the two is worth more is the reader's to say.
+        if !Self.claudeFullScreen { env["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"] = "1" }
         if let enc = inherited["__CF_USER_TEXT_ENCODING"] { env["__CF_USER_TEXT_ENCODING"] = enc }
         env.merge(cliEnvironment(for: tab.id, path: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")) { $1 }
         if let codexHome = inherited["CODEX_HOME"] { env["CODEX_HOME"] = codexHome }
@@ -1815,5 +1821,13 @@ final class Store: ObservableObject {
         codexStarts.values.forEach { $0.cancel() }
         CodexManager.shared.shutdown()
         terminals.values.forEach(killTree)
+    }
+}
+
+extension Store {
+    /// Whether Claude Code keeps its own full-screen layout. Defaults to on, so a session that
+    /// has never been told otherwise behaves as Claude Code does everywhere else.
+    static var claudeFullScreen: Bool {
+        UserDefaults.standard.object(forKey: Prefs.claudeFullScreen) as? Bool ?? true
     }
 }

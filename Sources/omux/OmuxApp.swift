@@ -69,6 +69,13 @@ enum Prefs {
     static let bypassPermissions = "bypassPermissions"
     /// How agent sessions show in the main panel: "terminal" (default) or "transcript" (beta).
     static let sessionView = "sessionView"
+    /// Claude Code keeps its own full-screen layout — the request held at the top of the view,
+    /// its Jump to bottom — by drawing on the alternate screen. That screen holds no scrollback,
+    /// so the terminal has nothing of its own to scroll and the scrollbar can only offer a
+    /// handle. Off puts the conversation in the terminal's buffer instead, where the scrollbar
+    /// shows where in it you are and Claude Code draws neither. On by default. Read when a
+    /// session starts; running ones keep the screen they began with.
+    static let claudeFullScreen = "claudeFullScreen"
     static let accent = "accent"
     static let transcriptFont = "transcriptFont"
     static let transcriptSize = "transcriptSize"
@@ -81,7 +88,7 @@ enum Prefs {
     static let all = [confirmQuit, showFolderPath, usageInterval, theme, autoResume, showFiles, showSidebar, filesByDate,
                       filesBrowserCollapsed, previewWrapLines, panelTab, fontFamily, fontSize,
                       notifyNeedsYou, notifyDone, notifyPrograms, cliEnabled, openLinksIn, homeEnabled, playAgent, startWithoutHistory, bypassPermissions,
-                      sessionView, accent, transcriptFont, transcriptSize, transcriptWidth, transcriptDensity, transcriptBubbles, transcriptTimestamps]
+                      sessionView, claudeFullScreen, accent, transcriptFont, transcriptSize, transcriptWidth, transcriptDensity, transcriptBubbles, transcriptTimestamps]
 
     /// A beta build (./build.sh --beta) starts out with the release app's settings, such as
     /// the theme and font, instead of the defaults. Only on its first launch.
@@ -382,6 +389,7 @@ private struct AppearanceSettings: View {
 
 private struct SessionSettings: View {
     @AppStorage(Prefs.sessionView) private var sessionView = "terminal"
+    @AppStorage(Prefs.claudeFullScreen) private var claudeFullScreen = true
     @AppStorage(Prefs.playAgent) private var playAgent = "claude"
     @AppStorage(Prefs.startWithoutHistory) private var startWithoutHistory = "fresh"
     @AppStorage(Prefs.autoResume) private var autoResume = false
@@ -396,6 +404,10 @@ private struct SessionSettings: View {
                     Text("Transcript").tag("transcript")
                 }
                 .pickerStyle(.radioGroup)
+                Toggle("Let Claude Code keep its full-screen layout", isOn: $claudeFullScreen)
+                SettingNote(claudeFullScreen
+                    ? "Claude Code holds the request you are reading at the top of the view and offers Jump to bottom. It draws these on the alternate screen, which keeps no scrollback, so omux's scrollbar can only offer a handle rather than show where in the conversation you are."
+                    : "The conversation goes in the terminal's own buffer: the scrollbar shows where in it you are, and scrolling works as it does in any other program. Claude Code draws neither the held request nor Jump to bottom. Read when a session starts; running ones keep the screen they began with.")
                 SettingNote(sessionView == "transcript"
                     ? "Every session is a chat, read from Claude Code's transcript or Codex's thread, with a box that types into the terminal. The terminal keeps running underneath; ⌥⌘P peeks at it. A project can choose its own view in its settings."
                     : "Every session is its terminal. Transcript shows the same sessions as chat, with a compose box; a project can choose its own view in its settings.")
@@ -670,6 +682,8 @@ struct SessionHeader: View {
     @Binding var showFiles: Bool
     @Binding var showSidebar: Bool
     @AppStorage(Prefs.sidebarLayout) private var sidebarLayout = "rail"
+    /// Holds the invisible view the split menu hangs from.
+    @StateObject private var splitAnchor = SplitMenuAnchor.Holder()
 
     var body: some View { WithRuntime(store.selectedTabID) { _ in sessionBody } }
 
@@ -752,27 +766,16 @@ struct SessionHeader: View {
             // One button for splitting, in plain sight: a shell beside or below this session,
             // or another session of the project next to it. Each pane has its own once there are panes.
             if store.shownLayout == nil, let id = store.selectedTabID {
-                Menu {
-                    Button("New Shell to the Right") { store.splitWithShell(id, axis: .horizontal) }
-                    Button("New Shell Below") { store.splitWithShell(id, axis: .vertical) }
+                Button {
                     let others = (store.selectedGroup?.tabs ?? []).filter { $0.id != id }
-                    if !others.isEmpty {
-                        Section("Show beside this session") {
-                            ForEach(others) { other in
-                                Button(other.name) { store.splitPane(id, with: other.id, axis: .horizontal) }
-                            }
-                        }
-                    }
+                    SplitMenu.show(SplitMenu.Model(others: others.map { ($0.name, $0.id) },
+                                                   onShell: { store.splitWithShell(id, axis: $0) },
+                                                   onBeside: { store.splitPane(id, with: $0, axis: .horizontal) }),
+                                   from: splitAnchor)
                 } label: {
                     Image(systemName: "rectangle.split.2x1")
-                        .font(.system(size: 11.5, weight: .medium))
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
                 }
-                .menuStyle(.button)
-                .buttonStyle(.plain)
-                .menuIndicator(.hidden)
-                .fixedSize()
+                .background(SplitMenuAnchor(holder: splitAnchor))
                 .help("Split: a shell or another session beside this one")
             }
             Button { showFiles.toggle() } label: { Image(systemName: "sidebar.trailing") }

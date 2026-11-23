@@ -28,6 +28,28 @@ final class PaneLayoutTests: XCTestCase {
         XCTAssertEqual(tree.removing(d), tree)
     }
 
+    /// Closing a pane used to leave the closed session selected. With no layout left — or with a
+    /// selection outside it — the screen shows the selected session alone, so the pane you pressed
+    /// the x on filled the window instead of going away.
+    func testClosingAPaneHandsTheScreenToItsNeighbour() {
+        let pair = PaneLayout.session(a).splitting(a, with: b, axis: .horizontal)
+        XCTAssertEqual(pair.neighbour(of: a), b, "the pane beside it takes over")
+        XCTAssertEqual(pair.neighbour(of: b), a, "the last pane hands back to the one before it")
+        XCTAssertNil(PaneLayout.session(a).neighbour(of: a), "a lone pane has no neighbour")
+        XCTAssertNil(pair.neighbour(of: d), "a pane that isn't there")
+
+        let tree = pair.splitting(b, with: c, axis: .vertical)
+        XCTAssertEqual(tree.ids, [a, b, c])
+        XCTAssertEqual(tree.neighbour(of: b), c)
+        XCTAssertEqual(tree.neighbour(of: c), b)
+        // The neighbour survives the removal, which is the point: it is what gets selected.
+        for id in tree.ids {
+            guard let next = tree.neighbour(of: id) else { return XCTFail("every pane of three has a neighbour") }
+            XCTAssertEqual(tree.removing(id)?.contains(next), true, "the neighbour is still in the layout")
+            XCTAssertNotEqual(next, id)
+        }
+    }
+
     func testMovingToAnEdge() {
         let tree = PaneLayout.session(a).splitting(a, with: b, axis: .horizontal).splitting(b, with: c, axis: .vertical)
         // c goes to the left of a: a's pane splits horizontally with c first.

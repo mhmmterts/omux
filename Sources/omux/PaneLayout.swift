@@ -46,6 +46,17 @@ indirect enum PaneLayout: Equatable {
         }
     }
 
+    /// The pane that should be selected once `id` leaves: the next one in reading order, or the
+    /// previous one when `id` was last. nil when `id` wasn't there or was the only pane. Closing
+    /// a pane has to move the selection, because a selection outside the layout shows that one
+    /// session alone — the pane you just closed, filling the screen.
+    func neighbour(of id: UUID) -> UUID? {
+        let all = ids
+        guard let i = all.firstIndex(of: id) else { return nil }
+        if i + 1 < all.count { return all[i + 1] }
+        return i > 0 ? all[i - 1] : nil
+    }
+
     /// Without `id`; its sibling takes the whole of their split. nil when `id` was all there was.
     func removing(_ id: UUID) -> PaneLayout? {
         switch self {

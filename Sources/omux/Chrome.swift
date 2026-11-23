@@ -116,8 +116,13 @@ extension View {
     func actsAsTitleBar() -> some View { background(TitleBarArea()) }
 }
 
-private struct TitleBarArea: NSViewRepresentable {
-    func makeNSView(context: Context) -> AreaView { AreaView() }
+/// Internal rather than private so the strip's press handling can be tested: a press that
+/// doesn't move must not drag the window.
+struct TitleBarArea: NSViewRepresentable {
+    func makeNSView(context: Context) -> AreaView {
+        AreaView.watchMenus()
+        return AreaView()
+    }
     func updateNSView(_ view: AreaView, context: Context) {}
 
     final class AreaView: NSView {
@@ -129,9 +134,62 @@ private struct TitleBarArea: NSViewRepresentable {
         // A title bar drags a window that isn't in front, too.
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+        /// Where a press started, so dragging the window waits for the pointer to actually move.
+        /// A press that doesn't move has to stay with whatever it landed on: starting a window
+        /// drag closes an open menu, and against a screen edge macOS takes the press for its own
+        /// window tiling, which is why the strip's buttons only misbehaved near one.
+        private var pressedAt: NSPoint?
+        /// The press itself, not the drag that follows it: `performDrag` takes the grab point from
+        /// the event it is given, so handing it the drag event would move the window's grab point
+        /// to wherever the threshold happened to be crossed.
+        private var pressEvent: NSEvent?
+        /// Far enough that a hand holding a button still counts as a click: a press on a control
+        /// drifts by a few points, and every one of those points used to move the window.
+        static let dragThreshold: CGFloat = 8
+
+        /// True while any of the app's menus is on screen. A press that opened a menu must not
+        /// also drag the window: moving the window closes the menu, which is how the strip's
+        /// split button lost its menu as soon as it opened.
+        static var menuIsOpen = false
+        private static var watching = false
+
+        static func watchMenus() {
+            guard !watching else { return }
+            watching = true
+            let centre = NotificationCenter.default
+            centre.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { _ in
+                menuIsOpen = true
+            }
+            centre.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { _ in
+                menuIsOpen = false
+            }
+        }
+
+        static func movedEnough(from: NSPoint, to: NSPoint) -> Bool {
+            hypot(to.x - from.x, to.y - from.y) >= dragThreshold
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            pressedAt = nil
+            pressEvent = nil
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard !Self.menuIsOpen, let window, let from = pressedAt,
+                  Self.movedEnough(from: from, to: event.locationInWindow) else { return }
+            let press = pressEvent ?? event
+            pressedAt = nil
+            pressEvent = nil
+            window.performDrag(with: press)
+        }
+
         override func mouseDown(with event: NSEvent) {
             guard let window else { return }
-            guard event.clickCount == 2 else { return window.performDrag(with: event) }
+            pressedAt = event.locationInWindow
+            pressEvent = event
+            guard event.clickCount == 2 else { return }
+            pressedAt = nil
+            pressEvent = nil
             // In full screen there's nothing to fill or minimize.
             guard !window.styleMask.contains(.fullScreen) else { return }
             // What the person picked in System Settings, Desktop & Dock. Older systems kept only

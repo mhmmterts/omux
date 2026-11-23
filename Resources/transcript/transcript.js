@@ -779,9 +779,15 @@
 
   // The request of the turn being read stays at the top of the view, so a long card's sides end
   // in its own rounded top instead of running off the page. One head at a time; it slides away
-  // as its card ends. A request taller than a few lines isn't held: it would cover the page.
+  // as its card ends. A request taller than a quarter of the view isn't held: it would cover the page.
   // The held request's distance from the top of the view: clear of the panel's rounded edge.
   const pinGap = 8;
+  // The tallest request still worth holding. A fixed ceiling suited one window size only: the
+  // same few lines that sit lightly on a tall window cover a short one, and a dictated request
+  // runs past it on every window, so the longest turns — the ones hardest to scroll back to —
+  // were the ones never held. A share of the view holds those too while leaving most of the
+  // page to the reply, and the floor keeps short windows behaving as they always did.
+  function pinCap(viewportHeight) { return Math.max(96, Math.round(viewportHeight * 0.25)); }
   let pinned = null, pinQueued = false;
   function pinTurn() {
     pinQueued = false;
@@ -795,7 +801,7 @@
         const height = head.offsetHeight;
         const natural = body.getBoundingClientRect().top - height;
         if (natural > pinGap) break;
-        if (height > 96) continue;
+        if (height > pinCap(window.innerHeight)) continue;
         let end = body;
         while (end.nextElementSibling && !end.classList.contains('turn-end') && !end.nextElementSibling.classList.contains('turn-head')) end = end.nextElementSibling;
         const bottom = end.getBoundingClientRect().bottom;

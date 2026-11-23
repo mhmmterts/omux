@@ -87,7 +87,7 @@ final class TermView: LocalProcessTerminalView {
         // A terminal's lines are short, so a wheel notch that moves a couple of them covers
         // about as much as one does in a document. At SwiftTerm's own 1.0 a flick through a
         // session crawls; at three it overshoots what you were reading.
-        scrollSensitivity = 2.0
+        scrollSensitivity = Self.scrollSensitivityDefault
         // SwiftTerm's own scroller never enables itself as output arrives — it publishes the
         // state through a render frame that doesn't come — so its knob is never drawn, in
         // either style. TerminalScrollbar below draws ours from the same public numbers.
@@ -104,6 +104,109 @@ final class TermView: LocalProcessTerminalView {
 
     required init?(coder: NSCoder) { fatalError("not supported") }
 
+    /// How far a notch of the wheel moves the terminal's own scrollback.
+    static let scrollSensitivityDefault: CGFloat = 2.0
+    /// How many lines a wheel event asks for, and what is left over for the next one. Trackpad
+    /// deltas are pixels and are divided by the cell; a mouse wheel already counts in lines.
+    static func wheelLines(deltaY: CGFloat, precise: Bool, cellHeight: CGFloat,
+                           carried: CGFloat, step: CGFloat = 1) -> (lines: Int, carry: CGFloat) {
+        let inLines = precise ? deltaY / max(1, cellHeight) : deltaY
+        let wanted = inLines * scrollSensitivityDefault / max(1, step) + carried
+        let whole = Int(wanted.rounded(.towardZero))
+        return (whole, wanted - CGFloat(whole))
+    }
+
+    /// How many lines a program moves for one report it is sent. A TUI typically takes a notch
+    /// of the wheel to mean more than a line, so asking it for a line apiece scrolls it several
+    /// times too far. Dividing by this is what keeps a turn of the wheel covering the same
+    /// distance as it does in the terminal's own scrollback.
+    static let alternateReportStep: CGFloat = 3
+
+    /// How long between two reports sent to a program that scrolls itself. Sent together they
+    /// arrive in one read and it redraws once, so the burst moves no further than a single
+    /// notch. A frame apart, each one lands — which is what makes the speed match the
+    /// scrollback's under the same hand.
+    static let wheelReportGap: TimeInterval = 1.0 / 90
+    /// At most this many lines are owed at once; a flick should not scroll for a second after
+    /// the hand has stopped.
+    static let maxOwedWheelLines = 40
+    private var owedWheel = 0
+    private var wheelPacer: Timer?
+    private var wheelCarry: CGFloat = 0
+
+    /// Watches the wheel before SwiftTerm does. Its own handler is not open to override, and it
+    /// writes a turn of the wheel to a self-scrolling program as one burst of reports, which the
+    /// program redraws once and so treats as a single notch. Taking the event here lets the
+    /// reports go out spaced instead. Every other case is handed straight back.
+    private var wheelWatch: Any?
+
+    /// True when this took the event. Separated from the monitor so it can be read in a test.
+    func handleWheel(_ event: NSEvent) -> Bool {
+        let state = terminalInputStateSnapshot()
+        guard let state, state.isAlternateBuffer, state.mouseMode != .off else {
+            wheelCarry = 0
+            return false
+        }
+        let cell = frame.height / CGFloat(max(1, terminalDimensions.rows))
+        let (lines, carry) = Self.wheelLines(deltaY: event.scrollingDeltaY,
+                                             precise: event.hasPreciseScrollingDeltas,
+                                             cellHeight: cell, carried: wheelCarry,
+                                             step: Self.alternateReportStep)
+        wheelCarry = carry
+        if lines != 0 { owe(lines: lines) }
+        return true
+    }
+
+    private func startWheelWatch() {
+        guard wheelWatch == nil else { return }
+        wheelWatch = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self, let window = self.window, event.window === window, !self.isHidden else { return event }
+            let here = self.convert(event.locationInWindow, from: nil)
+            guard self.bounds.contains(here) else { return event }
+            return self.handleWheel(event) ? nil : event
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window == nil ? stopWheelWatch() : startWheelWatch()
+    }
+
+    private func stopWheelWatch() {
+        if let wheelWatch { NSEvent.removeMonitor(wheelWatch) }
+        wheelWatch = nil
+        wheelPacer?.invalidate()
+        wheelPacer = nil
+        owedWheel = 0
+    }
+
+    /// Adds to what the program is owed, turning around if the hand did.
+    private func owe(lines: Int) {
+        if owedWheel != 0, (owedWheel > 0) != (lines > 0) { owedWheel = 0 }
+        let sign = lines > 0 ? 1 : -1
+        owedWheel = sign * min(Self.maxOwedWheelLines, abs(owedWheel) + abs(lines))
+        guard wheelPacer == nil else { return }
+        let timer = Timer(timeInterval: Self.wheelReportGap, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.payOneWheelLine() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        wheelPacer = timer
+        payOneWheelLine()
+    }
+
+    private func payOneWheelLine() {
+        guard owedWheel != 0 else {
+            wheelPacer?.invalidate()
+            wheelPacer = nil
+            return
+        }
+        let up = owedWheel > 0
+        owedWheel += up ? -1 : 1
+        let size = terminalDimensions
+        let col = max(1, size.cols / 2), row = max(1, size.rows / 2)
+        send(txt: "\u{1b}[<\(up ? 64 : 65);\(col);\(row)M")
+    }
+
     /// The last `count` lines on screen (and just above it), without trailing blank lines.
     /// For the `omux screen` command.
     func lastLines(_ count: Int) -> [String] {
@@ -113,6 +216,14 @@ final class TermView: LocalProcessTerminalView {
         }
         while let last = lines.last, last.isEmpty { lines.removeLast() }
         return Array(lines.suffix(count))
+    }
+
+    /// The lines on screen now, including the line a full-screen program is drawing its input
+    /// on. `lastLines` reads the scrollback instead, where that line has never been written, so
+    /// anything asking what the session is showing this moment asks here.
+    func visibleLines() -> [String] {
+        guard let snapshot = terminalContentSnapshot(region: .viewport) else { return [] }
+        return snapshot.rows.map { String($0.text.reversed().drop { $0 == " " }.reversed()) }
     }
 
     /// Takes SwiftTerm's own scroller out of the way. Now that a session's conversation lives
@@ -408,6 +519,12 @@ final class TerminalScrollbar: NSView {
     private static let pixelsPerNotch: CGFloat = 3
     /// Sends the program `notches` of wheel, positive up. Replaced in tests.
     var sendWheel: ((Int) -> Void)?
+    /// Whether the session is a Claude Code keeping its own full-screen layout. It draws its own
+    /// Jump to bottom and holds the request at the top of the view, and it keeps its scroll
+    /// position to itself — so a knob beside it can only be a handle that says nothing true
+    /// about where in the conversation you are. Better none at all. Other full-screen programs
+    /// (vim, htop) draw no such thing, so the handle stays for them. Replaced in tests.
+    var claudeDrawsItsOwn: (() -> Bool)?
     /// Where in the knob the drag started, as a distance from the knob's top.
     private var grab: CGFloat?
     private var lastDrag: CGFloat?
@@ -452,7 +569,13 @@ final class TerminalScrollbar: NSView {
             needsDisplay = true
         }
         let state = (canScroll: term.canScroll, position: term.scrollPosition, thumb: term.scrollThumbsize)
-        isHidden = !onAlternateScreen && !state.canScroll
+        let claudeOwnsIt = onAlternateScreen && (claudeDrawsItsOwn?() ?? false)
+        let hide = claudeOwnsIt || (!onAlternateScreen && !state.canScroll)
+        if hide != isHidden {
+            isHidden = hide
+            // The session is laid out around this strip, so it has to be measured again.
+            (superview as? TerminalHost.Container)?.place()
+        }
         if state != shown {
             shown = state
             needsDisplay = true
@@ -593,12 +716,17 @@ final class TerminalDictationButton: NSView {
     /// Clear of the window's own rounded corner and of the scrollbar beside it.
     static let inset: CGFloat = 6
 
-    /// What a press does: by default it taps the session's space bar, which is what Claude
-    /// Code's own voice mode listens for — one tap to start, one to send. Replaced in tests.
+    /// What a press does: by default it sends the key bound to Claude Code's voice mode,
+    /// one press to start, one to send. Replaced in tests.
     var onPress: (() -> Void)?
     /// Sends the keys a press stands for. Set by the pane; without it there is nothing to press.
     var sendKeys: ((String) -> Void)?
-    /// What a tap sends: the space bar, with the agent's line empty.
+    /// What a press sends: the space bar, which is how Claude Code's voice mode waits to be
+    /// started — and the only way. `voice:pushToTalk` can be bound to a key of its own in
+    /// ~/.claude/keybindings.json, but pressing that key does not start a recording, by hand or
+    /// from here: the action wants a key held, not tapped. So a message already part-written
+    /// cannot be dictated into; space would only type a space. Editing one ends the dictation
+    /// and the rest has to be typed.
     static let tap = " "
     private weak var term: TermView?
     private var hovering = false
@@ -608,7 +736,7 @@ final class TerminalDictationButton: NSView {
         self.term = term
         super.init(frame: .zero)
         wantsLayer = true
-        toolTip = "Dictate: starts Claude Code's own voice mode (tap again to send)"
+        toolTip = "Dictate: starts Claude Code's own voice mode (press again to send)"
     }
 
     required init?(coder: NSCoder) { fatalError("not supported") }
@@ -653,9 +781,9 @@ final class TerminalDictationButton: NSView {
         press()
     }
 
-    /// Claude Code's own voice mode, started the way it waits to be started: a tap of the
-    /// space bar with the line empty, and a second tap to send what was said. The keyboard
-    /// goes back to the session so the next tap lands there too.
+    /// Claude Code's own voice mode, started through the key bound to it. A second press
+    /// sends what was said. The keyboard goes back to the session so the next press lands
+    /// there too.
     func press() {
         term?.window?.makeFirstResponder(term)
         sendKeys?(Self.tap)
@@ -688,7 +816,7 @@ final class TerminalDictationButton: NSView {
             needsDisplay = true
         }
         guard running else { return }
-        let text = (screenText?() ?? term?.lastLines(8).joined(separator: "\n") ?? "").lowercased()
+        let text = (screenText?() ?? term?.visibleLines().joined(separator: "\n") ?? "").lowercased()
         let now = Self.listeningMarks.contains { text.contains($0) }
         guard now != listening else { return }
         listening = now
@@ -744,7 +872,12 @@ struct TerminalHost: NSViewRepresentable {
         /// never runs again and the children keep their zero frames. Place them on every size
         /// change as well.
         func place() {
-            let split = bounds.divided(atDistance: TerminalScrollbar.width, from: .maxXEdge)
+            // A hidden scrollbar takes no room: a Claude Code drawing its own Jump to bottom
+            // leaves no knob beside it, and a strip of empty background where one would have
+            // been is just a narrower session.
+            let bar = subviews.first { $0 is TerminalScrollbar }
+            let reserved = (bar?.isHidden ?? false) ? 0 : TerminalScrollbar.width
+            let split = bounds.divided(atDistance: reserved, from: .maxXEdge)
             (subviews.first { $0 is TermView } as? TermView)?.hideBuiltInScroller()
             let size = TerminalDictationButton.size, inset = TerminalDictationButton.inset
             for view in subviews {
@@ -843,7 +976,13 @@ struct TerminalHost: NSViewRepresentable {
         // The scrollbar sits beside the terminal rather than over it, so no line of output ends
         // up underneath the knob.
         container.addSubview(termView)
-        container.addSubview(TerminalScrollbar(term: termView))
+        let scrollbar = TerminalScrollbar(term: termView)
+        scrollbar.claudeDrawsItsOwn = { [weak termView] in
+            guard Store.claudeFullScreen, let termView,
+                  let runtime = Store.shared.runtime[termView.tabID] else { return false }
+            return runtime.provider == .claude && !runtime.exited
+        }
+        container.addSubview(scrollbar)
         // The button goes in whatever the session is doing now; it shows itself only while an
         // agent with a voice mode is actually running there. A session that was Claude Code
         // yesterday and sits in a plain shell today has nothing to tap, and one started a

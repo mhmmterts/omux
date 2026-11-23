@@ -30,6 +30,12 @@ final class TerminalPaneLiveTests: XCTestCase {
         guard let bar = find(TerminalScrollbar.self, in: host) else {
             return XCTFail("SwiftUI's pane has no scrollbar in it at all")
         }
+        // An empty session has nothing to scroll and the scrollbar hides, taking its strip with
+        // it. Give the session a conversation first, which is when a reader wants the knob.
+        term.feed(byteArray: Array((1...3000).map { "line \($0)\r\n" }.joined().utf8)[...])
+        bar.refresh()
+        (bar.superview as? TerminalHost.Container)?.place()
+        XCTAssertFalse(bar.isHidden, "a session with a conversation in it has something to scroll")
         XCTAssertEqual(bar.frame.width, TerminalScrollbar.width, "the scrollbar has no width in the real pane")
         XCTAssertGreaterThan(bar.frame.height, 100, "the scrollbar has no height in the real pane")
         XCTAssertNotNil(bar.window, "the scrollbar never reached the window")
