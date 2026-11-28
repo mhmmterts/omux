@@ -4,11 +4,36 @@ All notable changes to omux are listed here. Versions follow [Semantic Versionin
 
 ## [Unreleased]
 
+### Security
+- **Each session has its own `omux` token.** Every session shared one, so a session could name a sibling in `OMUX_TAB_ID` and type into it. A token now only works for the session it was made for. Thanks to Samet Samyeli (#83).
+- **Review notes are no longer run by the shell.** Sent from Changes to a session whose agent had quit, the notes were typed at the shell prompt, which ran `$(…)` in a note or a file name. They now wait for the agent, starting it first if needed. Thanks to Samet Samyeli (#76).
+- **Adding an MCP server asks first.** The Add server form now confirms in omux's own window, showing the command or address in full, before anything is added.
+
 ### Added
 - **Open Recent Conversation says how large each conversation is,** beside its date: what it came to when it was last sent, so an expensive one is recognisable before it is opened. A row is named after the first thing typed in it, which says nothing about what picking it up again would cost.
+- **Statistics: a range and Share.** 24 hours, 7 days, 30 days or a month, with everything on the page following it. Share makes a card to post or a full report, with a choice of projects and switches to hide project names, session titles and commit messages; copy it as an image or Markdown, or save a PNG or PDF. Thanks to Hasan Emir Yıldırım (#63).
+- **Migrate from Muxy.** Settings › Migration brings over Muxy's projects, with their pictures, and the settings omux has a counterpart for. Muxy's files are only read. Thanks to ZgrK (#86).
+- **Follow the system's light or dark appearance.** Settings › Appearance › Match system appearance, with a theme of your choice for each. Off by default. Thanks to Ahmet Bedir (#85).
+- **A colour-blind friendly status palette.** Settings › Appearance › Status colours switches working, needs you, done, failed and subagent to the Okabe–Ito colours. Thanks to Yunus Emre Özbucak (#72).
+- **The Vesper theme.** Thanks to Anıl Soylu (#77).
+- **Terminal keys.** ⌘⌫, ⌘← and ⌘→ edit the line, ⌘F searches the scrollback (⌘G and ⇧⌘G for next and previous), and Session › Clear Terminal (⇧⌘K) empties it. Thanks to Anıl Soylu (#78).
+- **Panes from the keyboard.** ⌘D and ⇧⌘D open a shell to the right or below; ⌥⌘ with an arrow goes to the pane on that side. Thanks to Anıl Soylu (#79).
+- **An update button in the sidebar** once a newer version has been found, so "Remind Me Later" doesn't hide it until the next day. Thanks to Anıl Soylu (#80).
+- **A pull request that conflicts with its base says so**, with "Ask Session to Resolve Conflicts" in its popover and the session's menu. Thanks to Anıl Soylu (#81).
+- **Mark files as viewed in Changes.** The mark goes away when the file changes again. Thanks to Anıl Soylu (#82).
 
 ### Fixed
 - **A session follows the conversation it is actually on.** A /clear, "Start a new conversation" at Claude Code's cold-resume question, or a `claude --continue` typed into the shell leaves the terminal on a new conversation. The session stayed pinned to the old one, so the sidebar measured the conversation left behind, restarting the session went back to it instead of the one you had been talking to, and picking the old one out of Open Recent Conversation jumped to a session showing something else. The conversation left behind keeps its transcript and stays in the list.
+- **A workspace omux can't read is kept, not saved over.** An unreadable `workspace.json` was replaced by "Default" and its backup a save later. The file is now copied aside first, one bad session no longer takes every project with it, and a notice says where the copy is. Thanks to Samet Samyeli (#75).
+- **An `omux` command that hangs up early no longer quits omux.** The guard from 0.12.5 missed the case where the tool was gone before omux picked up the connection. Thanks to Anıl Soylu (#84).
+- **A Codex conversation redraws only what changed**, not every finished command every five seconds. Thanks to Samet Samyeli (#74).
+- **Subagents follow the conversation `claude` is on.** The Agents tab and the sidebar count looked for subagents under the conversation omux started the session with, so after a `claude --resume` typed into the session, or a /resume or /clear, they showed "No agents in this session" while agents ran. They now follow the running `claude`, as the transcript view does. (#88)
+- **The running `claude` is found when it runs with `CLAUDE_CONFIG_DIR` set.** Claude Code then keeps its process record in that folder instead of `~/.claude`, where omux looked, so the transcript view stayed on the session's first conversation. omux now reads the folder from the process's environment. Thanks to Ozan Bilgili (#89).
+
+## [0.12.6] - 2026-11-22
+
+### Security
+- **Text in a reply can no longer become part of the conversation page.** A reply, a thinking block or an image record could carry markup that the page drew as real elements, and a click on them could add an MCP server, add a permission rule or type a command into the session. The text could come from anything the agent read: a web page, a README, an issue. Replies now pass an allowlist, pictures are checked where they are read and where they are drawn, and omux only acts on a request from the page when it matches what omux itself put there. Thanks to Yusuf Karan (#73).
 
 ## [0.12.5] - 2026-11-21
 

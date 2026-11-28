@@ -53,9 +53,11 @@ struct TranscriptPanel: View {
     @AppStorage(Prefs.transcriptDensity) private var transcriptDensity = "comfortable"
     @AppStorage(Prefs.transcriptBubbles) private var transcriptBubbles = "tinted"
     @AppStorage(Prefs.transcriptTimestamps) private var transcriptTimestamps = true
+    @AppStorage(Prefs.colorBlindPalette) private var colorBlindPalette = false
     private var style: TranscriptStyle {
         TranscriptStyle(accent: accentChoice, font: transcriptFont, size: transcriptSize, width: transcriptWidth,
-                        density: transcriptDensity, bubbles: transcriptBubbles, timestamps: transcriptTimestamps, layout: transcriptLayout)
+                        density: transcriptDensity, bubbles: transcriptBubbles, timestamps: transcriptTimestamps, layout: transcriptLayout,
+                        colorBlind: colorBlindPalette)
     }
     @AppStorage(Prefs.transcriptLayout) private var transcriptLayout = "cards"
     /// Whether the project is a git repository, checked once per folder rather than on every redraw.
@@ -396,11 +398,16 @@ struct TranscriptPanel: View {
             if let id = message["id"] as? String, let agent = agents.agents[tabID]?.first(where: { $0.id == id }) {
                 store.openAgentTranscript(agent, in: tabID)
             }
+        // The page draws what agents and tools wrote, so what it asks for is checked against
+        // what omux put on it: a message from it is a request, not the user's word.
         case "send":
-            if let text = message["text"] as? String { send(text) }
+            // "Send again" on one of the user's own prompts: nothing else is sent as theirs.
+            if let text = message["text"] as? String, model.blocks.contains(where: { $0.kind == .user && $0.text == text }) { send(text) }
         case "manage":
-            // The real command, which opens the agent's dialog on the terminal.
+            // The real command, which opens the agent's dialog on the terminal: the one an
+            // overview on the page carries, and no other.
             if let command = message["command"] as? String, command.hasPrefix("/"), !command.contains(" "),
+               model.blocks.contains(where: { $0.info?.command == command }),
                store.sendText(command, to: tabID, submit: true) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { TerminalPeek.shared.show(tabID, store: store, automatic: true) }
             }
@@ -428,7 +435,9 @@ struct TranscriptPanel: View {
     /// uninstall a plugin, add or remove a permission rule. Through the agent's own command line
     /// or its settings files, then the overview is redrawn.
     private func configure(_ message: [String: Any]) {
-        guard let action = message["action"] as? String, let blockID = message["block"] as? Int else { return }
+        guard let action = message["action"] as? String, let blockID = message["block"] as? Int,
+              let shown = model.blocks.first(where: { $0.id == blockID && $0.kind == .info })?.info,
+              Self.offers(shown, action: action, message: message) else { return }
         if action == "machines-open" {
             UserDefaults.standard.set(SettingsView.Pane.machines.rawValue, forKey: SettingsView.paneKey)
             openSettings()
@@ -450,6 +459,17 @@ struct TranscriptPanel: View {
             guard AgentConfig.validName(name), !target.isEmpty, ["stdio", "http", "sse"].contains(transport) else {
                 model.note("Add server: a name of letters, digits, dots and dashes, and a command or URL, are needed"); return
             }
+            // Asked in omux's own window, which the page can't draw on or click: a server is a
+            // command that runs every time the agent starts, so nothing on the page adds one alone.
+            let question = Self.addServerQuestion(name: name, transport: transport, target: target, scope: scope, agent: tool == "codex" ? "Codex" : "Claude Code")
+            let alert = NSAlert()
+            alert.messageText = question.title
+            alert.informativeText = question.detail
+            alert.addButton(withTitle: "Add Server")
+            alert.addButton(withTitle: "Cancel")
+            // Return doesn't add it: the choice has to be made.
+            alert.buttons.first?.keyEquivalent = ""
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
             let words = target.split(separator: " ").map(String.init)
             if tool == "codex" {
                 work = { await AgentConfig.run(transport == "stdio" ? ["mcp", "add", name, "--"] + words : ["mcp", "add", name, "--url", target], tool: "codex") }
@@ -544,6 +564,40 @@ struct TranscriptPanel: View {
             let firstLine = output.split(separator: "\n").first.map(String.init) ?? (ok ? "Done" : "Failed")
             model.note((ok ? "" : "Failed: ") + (firstLine.count > 200 ? String(firstLine.prefix(200)) + "…" : firstLine))
             refresh(overviewKind, block: blockID, project: project)
+        }
+    }
+
+    /// What is asked before an MCP server is added: the command or address in full, as it will
+    /// be stored, so what is agreed to is what runs.
+    static func addServerQuestion(name: String, transport: String, target: String, scope: String, agent: String) -> (title: String, detail: String) {
+        let place = ["user": "for all your projects", "local": "for this project, on this Mac only", "project": "in this project's .mcp.json, shared with the project"][scope] ?? "for all your projects"
+        if transport == "stdio" {
+            return ("Add the MCP server “\(name)”?",
+                    "\(agent) will run this command each time it starts, \(place):\n\n\(target)\n\nOnly add a command you know.")
+        }
+        return ("Add the MCP server “\(name)”?",
+                "\(agent) will connect to this address (\(transport)) each time it starts, \(place):\n\n\(target)\n\nOnly add a server you trust.")
+    }
+
+    /// Whether an overview omux drew offers `action`: through its add form, its extra button, or
+    /// a button on the row the message names. These actions add MCP servers, which are commands
+    /// that run, and change what an agent may do without asking, so the page can only ask for
+    /// what was put on it. Markup that got onto the page some other way names an overview that
+    /// isn't there, or a row it doesn't have.
+    static func offers(_ overview: AgentConfig.Overview, action: String, message: [String: Any]) -> Bool {
+        switch action {
+        case "mcp-add": return overview.form == "mcp"
+        case "perm-add": return overview.form == "permission"
+        case "machines-open", "mcp-import": return overview.actionID == action
+        default: break
+        }
+        // A row's button: "mcp-remove" is "remove" on a row of the servers' overview.
+        let verb = action.split(separator: "-", maxSplits: 1).last.map(String.init) ?? action
+        let arg = message["arg"] as? String ?? ""
+        return overview.rows.contains { row in
+            guard row.actions.contains(verb), row.arg == arg else { return false }
+            if action.hasPrefix("perm-") { return row.name == message["kind"] as? String && row.detail == message["rule"] as? String }
+            return row.name == message["name"] as? String
         }
     }
 

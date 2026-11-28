@@ -126,7 +126,8 @@ final class Store: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     private init() {
-        let saved = Persistence.loadWorkspace()
+        let loaded = Persistence.loadWorkspace()
+        let saved = loaded.workspace
         var groups = saved?.groups ?? []
         if groups.isEmpty {
             groups = [TabGroup(name: "Default", tabs: [TabItem(name: "Session 1")])]
@@ -188,6 +189,12 @@ final class Store: ObservableObject {
             self?.save()
         }
         if saved == nil { save() }
+        if !loaded.kept.isEmpty {
+            let paths = loaded.kept.map { ($0.path as NSString).abbreviatingWithTildeInPath }
+            Notices.shared.post("omux couldn't read all of its saved projects",
+                                detail: "It opened what it could and kept the file as it was: " + paths.joined(separator: ", "),
+                                isError: true)
+        }
         // Fresh installs (no workspace yet) get the welcome sheet; updates don't. It stays under
         // Help › Welcome to omux. A beat later, so the window is there to present it on.
         if !UserDefaults.standard.bool(forKey: Prefs.welcomed) {
@@ -380,6 +387,14 @@ final class Store: ObservableObject {
         setLayout(current.moving(id, to: target, edge: edge), near: id)
         maximizedID = nil
         selectedTabID = id
+    }
+
+    /// Selects the pane across `edge` of the selected one; it takes keyboard focus as on a click.
+    /// Nothing happens with one pane on screen, a maximized one included, since there is no
+    /// neighbour in sight to go to.
+    func focusPane(toward edge: Edge) {
+        guard let selected = selectedTabID, let next = shownLayout?.neighbour(of: selected, toward: edge) else { return }
+        selectedTabID = next
     }
 
     func maximize(_ id: UUID) {
@@ -975,8 +990,8 @@ final class Store: ObservableObject {
     }
 
     /// The transcript of the session's Claude Code conversation. The `claude` running in the
-    /// terminal first, which Claude Code records per process in ~/.claude/sessions/<pid>.json: that
-    /// follows a /clear, a `claude` typed into a shell, or `claude --continue`. Else the tab's own id.
+    /// terminal first (see `liveClaudeSessions`): that follows a /clear, a `claude` typed into a
+    /// shell, or `claude --continue`. Else the tab's own id.
     func claudeTranscriptURL(for id: UUID) -> URL? {
         guard let tab = tab(id) else { return nil }
         return Self.claudeTranscriptURL(pinned: tab.claudeSessionID.uuidString.lowercased(),
@@ -1038,16 +1053,132 @@ final class Store: ObservableObject {
         return Darwin.kill(pid, 0) == 0 || errno == EPERM
     }
 
+    /// The conversation whose subagents the session lists: the one its `claude` is on, as for the
+    /// transcript, else the session's own, in its project folder.
+    func claudeConversation(for id: UUID) -> (session: String, project: URL?) {
+        Self.claudeConversation(pinned: tab(id)?.claudeSessionID.uuidString.lowercased() ?? "", live: liveClaudeSessions(for: id),
+                                project: claudeProjectFolderURL(for: id), lookup: Self.claudeTranscriptURL)
+    }
+
+    /// A live conversation with a transcript, in the folder that transcript is in; else the
+    /// session's own id in its project folder.
+    nonisolated static func claudeConversation(pinned: String, live: [String], project: URL?,
+                                               lookup: (String) -> URL?) -> (session: String, project: URL?) {
+        for session in live where session != pinned {
+            if let url = lookup(session) { return (session, url.deletingLastPathComponent()) }
+        }
+        return (pinned, project)
+    }
+
     /// The conversations the session's `claude` is on, newest first. Empty when nothing is
-    /// running there: then only the tab's own id is left to go on.
-    private func liveClaudeSessions(for id: UUID) -> [String] {
+    /// running there: then only the tab's own id is left to go on. Claude Code records each
+    /// conversation in <config>/sessions/<pid>.json, where <config> is the process's
+    /// CLAUDE_CONFIG_DIR when it runs with one, else ~/.claude.
+    func liveClaudeSessions(for id: UUID) -> [String] {
         guard let view = terminals[id], !(runtime[id]?.exited ?? true) else { return [] }
+        let children = Self.descendants(of: view.process.shellPid)
+        let folders = Self.claudeSessionFolders(home: NSHomeDirectory(),
+                                                configDirectories: children.map { claudeConfigDirectory(of: $0) })
+        let records = folders.flatMap { Self.claudeSessionRecords(in: $0) }
         let elsewhere = Set(allTabs.filter { $0.tab.id != id }
             .map { $0.tab.claudeSessionID.uuidString.lowercased() })
-        return Self.liveClaudeSessionIDs(records: Self.claudeSessionRecords(),
-                                         descendants: Set(Self.descendants(of: view.process.shellPid)),
+        return Self.liveClaudeSessionIDs(records: records,
+                                         descendants: Set(children),
                                          cwd: runtime[id]?.cwd ?? tab(id).flatMap(directory(of:)),
                                          pinnedElsewhere: elsewhere)
+    }
+
+    /// Every folder a session's conversation records could be in: ~/.claude/sessions, plus the
+    /// sessions folder of each CLAUDE_CONFIG_DIR a process in the session runs with. "" means
+    /// the process has none, or hasn't been asked yet.
+    nonisolated static func claudeSessionFolders(home: String, configDirectories: [String]) -> Set<String> {
+        var folders: Set<String> = [home + "/.claude/sessions"]
+        for config in configDirectories where !config.isEmpty {
+            folders.insert((config as NSString).expandingTildeInPath + "/sessions")
+        }
+        return folders
+    }
+
+    /// The CLAUDE_CONFIG_DIR each process was started with, "" for none, by pid and start time:
+    /// read once per process, since the sessions are looked up many times a minute.
+    private var claudeConfigDirectories: [String: String] = [:]
+
+    private func claudeConfigDirectory(of pid: pid_t) -> String {
+        guard let started = Self.startTime(of: pid) else { return "" }
+        let key = "\(pid)@\(started)"
+        if let known = claudeConfigDirectories[key] { return known }
+        // A build starts thousands of processes that are gone in a moment, and each read takes
+        // a megabyte of buffer: only a process that has stayed a few seconds is asked. `claude`
+        // has, by the time its conversation matters; until then it is looked for in ~/.claude.
+        guard let since = Double(started), Date().timeIntervalSince1970 - since > 3 else { return "" }
+        if claudeConfigDirectories.count > 512 { claudeConfigDirectories.removeAll() }
+        let directory = Self.environment(of: pid)["CLAUDE_CONFIG_DIR"] ?? ""
+        claudeConfigDirectories[key] = directory
+        return directory
+    }
+
+    /// When the process started, which tells a pid's process from a later one with the same pid.
+    private static func startTime(of pid: pid_t) -> String? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
+        let start = info.kp_proc.p_starttime
+        return "\(start.tv_sec).\(start.tv_usec)"
+    }
+
+    /// Where Claude Code records the conversation of the process `pid`.
+    nonisolated static func claudePidFile(_ pid: pid_t, configDirectory: String?, home: String) -> String {
+        let config = configDirectory.flatMap { $0.isEmpty ? nil : ($0 as NSString).expandingTildeInPath } ?? home + "/.claude"
+        return "\(config)/sessions/\(pid).json"
+    }
+
+    /// The session id in a Claude Code process record.
+    nonisolated static func claudeSessionID(pidFile path: String) -> String? {
+        guard let data = FileManager.default.contents(atPath: path),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        // The id becomes part of a file path, and the record is whatever a process in the
+        // session wrote: only a real session id is taken.
+        guard let id = object["sessionId"] as? String, UUID(uuidString: id) != nil else { return nil }
+        return id.lowercased()
+    }
+
+    /// The environment one of the user's own processes was started with.
+    private static func environment(of pid: pid_t) -> [String: String] {
+        var argmax: Int32 = 0
+        var length = MemoryLayout<Int32>.size
+        var limit: [Int32] = [CTL_KERN, KERN_ARGMAX]
+        guard sysctl(&limit, 2, &argmax, &length, nil, 0) == 0, argmax > 0 else { return [:] }
+        var bytes = [UInt8](repeating: 0, count: Int(argmax))
+        var size = bytes.count
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        guard sysctl(&mib, 3, &bytes, &size, nil, 0) == 0 else { return [:] }
+        return processArguments(Array(bytes.prefix(size))).environment
+    }
+
+    /// Reads KERN_PROCARGS2: the argument count, the executable's path and the NULs after it,
+    /// the arguments, then the environment up to an empty string.
+    nonisolated static func processArguments(_ bytes: [UInt8]) -> (arguments: [String], environment: [String: String]) {
+        guard bytes.count >= 4 else { return ([], [:]) }
+        let argc = Int(bytes.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) })
+        var index = 4
+        func next() -> String? {
+            guard index < bytes.count else { return nil }
+            let start = index
+            while index < bytes.count, bytes[index] != 0 { index += 1 }
+            defer { index += 1 }
+            return String(decoding: bytes[start..<index], as: UTF8.self)
+        }
+        _ = next()
+        while index < bytes.count, bytes[index] == 0 { index += 1 }
+        var arguments: [String] = []
+        while arguments.count < argc, let argument = next() { arguments.append(argument) }
+        var environment: [String: String] = [:]
+        while let entry = next(), !entry.isEmpty {
+            guard let equals = entry.firstIndex(of: "=") else { continue }
+            environment[String(entry[..<equals])] = String(entry[entry.index(after: equals)...])
+        }
+        return (arguments, environment)
     }
 
     /// The conversation a session is on: the running `claude`'s own once it has a transcript to
@@ -1247,7 +1378,7 @@ final class Store: ObservableObject {
 
     /// A project's folder may be typed as "~/app" or "/Users/me/app/"; Finder and agents
     /// report "/Users/me/app".
-    static func samePath(_ directory: String?, _ path: String) -> Bool {
+    nonisolated static func samePath(_ directory: String?, _ path: String) -> Bool {
         func normalized(_ p: String) -> String { ((p as NSString).expandingTildeInPath as NSString).standardizingPath }
         return directory.map(normalized) == normalized(path)
     }
@@ -1612,6 +1743,7 @@ final class Store: ObservableObject {
         cliChildren[id] = nil
         for key in cliChildren.keys { cliChildren[key]?.remove(id) }
         Notifier.shared.clear(tabID: id)
+        Changes.shared.forgetViewed(tab: id)
         browsers.removeValue(forKey: id)?.close()
         if openAgent?.tabID == id { openAgent = nil }
         if openCodexAgent?.tabID == id { openCodexAgent = nil }
@@ -1745,6 +1877,14 @@ final class Store: ObservableObject {
         makeTerminal(tab: group.tabs[0], group: group)
         selectedTabID = group.tabs[0].id
         if folder == nil { renamingID = group.id }
+    }
+
+    /// Projects brought over from another app. Their sessions stay stopped, as restored ones do,
+    /// until selected or played: a terminal for each of dozens of projects at once isn't wanted.
+    func importGroups(_ new: [TabGroup]) {
+        // Before the groups are published, so a view looking at a session finds it stopped.
+        for tab in new.flatMap(\.tabs) { runtime[tab.id] = TabRuntime(exited: true) }
+        groups.append(contentsOf: new)
     }
 
     /// Asks for the project's folder when it has none; false when the user cancelled.

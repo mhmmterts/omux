@@ -179,6 +179,7 @@ struct Sidebar: View {
                         .help("Open folder as a project (⌘O)")
                     Button { store.showRecentSessions = true } label: { Image(systemName: "clock.arrow.circlepath") }
                         .help("Open recent conversation (⇧⌘O)")
+                    UpdateAvailableButton()
                     SettingsLink { Image(systemName: "gearshape") }
                         .help("Settings (⌘,)")
                 }
@@ -588,6 +589,9 @@ struct TabMenu: View {
                 Button("Open Pull Request #\(pr.number)") { NSWorkspace.shared.open(pr.url) }
                 if pr.checksResult == .failed {
                     Button("Send Failing Checks to Session") { store.sendFailingChecks(tab.id) }
+                }
+                if pr.conflicts == true {
+                    Button("Ask Session to Resolve Conflicts") { store.sendConflicts(tab.id) }
                 }
             } else if let pr = pulls.requests[tab.id], pr.state == .merged {
                 Button("Delete Merged Worktree…") { store.cleanUpMergedWorktree(tab.id) }

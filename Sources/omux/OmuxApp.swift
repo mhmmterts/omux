@@ -8,8 +8,17 @@ import UniformTypeIdentifiers
 struct OmuxApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = Store.shared
+    @ObservedObject private var systemAppearance = SystemAppearance.shared
     @AppStorage(Prefs.accent) private var accent = "neutral"
     @AppStorage(Prefs.theme) private var themeName = Theme.black.rawValue
+    @AppStorage(Prefs.followSystemAppearance) private var followSystem = false
+    @AppStorage(Prefs.darkTheme) private var darkThemeName = Theme.black.rawValue
+    @AppStorage(Prefs.lightTheme) private var lightThemeName = Theme.light.rawValue
+
+    private var theme: Theme {
+        Theme.resolve(followSystem: followSystem, manual: themeName, dark: darkThemeName, light: lightThemeName,
+                      systemIsDark: systemAppearance.isDark)
+    }
 
     init() { Prefs.importReleaseSettingsIfBeta() }
 
@@ -17,7 +26,7 @@ struct OmuxApp: App {
         Window(Persistence.isBeta ? "omux Beta" : "omux", id: "main") {
             ContentView()
                 .environmentObject(store)
-                .tint(Color(nsColor: Appearance.accent(accent, theme: Theme(rawValue: themeName) ?? .black)))
+                .tint(Color(nsColor: Appearance.accent(accent, theme: theme)))
                 .frame(minWidth: 720, minHeight: 420)
         }
         .defaultSize(width: 1240, height: 780)
@@ -38,6 +47,9 @@ enum Prefs {
     static let sidebarLayout = "sidebarLayout"
     static let usageInterval = "usageInterval"
     static let theme = "theme"
+    static let followSystemAppearance = "followSystemAppearance"
+    static let darkTheme = "darkTheme"
+    static let lightTheme = "lightTheme"
     static let autoResume = "autoResume"
     static let showFiles = "showFiles"
     static let showSidebar = "showSidebar"
@@ -77,6 +89,7 @@ enum Prefs {
     /// session starts; running ones keep the screen they began with.
     static let claudeFullScreen = "claudeFullScreen"
     static let accent = "accent"
+    static let colorBlindPalette = "colorBlindPalette"
     static let transcriptFont = "transcriptFont"
     static let transcriptSize = "transcriptSize"
     static let transcriptWidth = "transcriptWidth"
@@ -85,7 +98,8 @@ enum Prefs {
     static let transcriptBubbles = "transcriptBubbles"
     static let transcriptTimestamps = "transcriptTimestamps"
 
-    static let all = [confirmQuit, showFolderPath, usageInterval, theme, autoResume, showFiles, showSidebar, filesByDate,
+    static let all = [confirmQuit, showFolderPath, usageInterval, theme, followSystemAppearance, darkTheme, lightTheme,
+                      autoResume, showFiles, showSidebar, filesByDate,
                       filesBrowserCollapsed, previewWrapLines, panelTab, fontFamily, fontSize,
                       notifyNeedsYou, notifyDone, notifyPrograms, cliEnabled, openLinksIn, homeEnabled, playAgent, startWithoutHistory, bypassPermissions,
                       sessionView, claudeFullScreen, accent, transcriptFont, transcriptSize, transcriptWidth, transcriptDensity, transcriptBubbles, transcriptTimestamps]
@@ -115,7 +129,7 @@ private struct MachinesMenuItem: View {
 }
 
 struct SettingsView: View {
-    enum Pane: String { case general, appearance, sessions, machines, notifications, updates }
+    enum Pane: String { case general, appearance, sessions, machines, notifications, migration, updates }
     static let paneKey = "settingsPane"
     @AppStorage(SettingsView.paneKey) private var pane = Pane.general.rawValue
 
@@ -132,6 +146,9 @@ struct SettingsView: View {
                 .tabItem { Label("Machines", systemImage: "network") }.tag(Pane.machines.rawValue)
             NotificationSettings()
                 .tabItem { Label("Notifications", systemImage: "bell") }.tag(Pane.notifications.rawValue)
+            MigrationSettings()
+                .environmentObject(Store.shared)
+                .tabItem { Label("Migration", systemImage: "square.and.arrow.down") }.tag(Pane.migration.rawValue)
             Form { UpdateSettings() }
                 .formStyle(.grouped)
                 .tabItem { Label("Updates", systemImage: "arrow.down.circle") }.tag(Pane.updates.rawValue)
@@ -272,7 +289,11 @@ private struct AppearancePreview: View {
 }
 
 private struct AppearanceSettings: View {
+    @ObservedObject private var systemAppearance = SystemAppearance.shared
     @AppStorage(Prefs.theme) private var theme = Theme.black.rawValue
+    @AppStorage(Prefs.followSystemAppearance) private var followSystem = false
+    @AppStorage(Prefs.darkTheme) private var darkTheme = Theme.black.rawValue
+    @AppStorage(Prefs.lightTheme) private var lightTheme = Theme.light.rawValue
     @AppStorage(Prefs.accent) private var accent = "neutral"
     @AppStorage(Prefs.fontFamily) private var fontFamily = ""
     @AppStorage(Prefs.fontSize) private var fontSize = Fonts.defaultSize
@@ -283,8 +304,22 @@ private struct AppearanceSettings: View {
     @AppStorage(Prefs.transcriptLayout) private var transcriptLayout = "cards"
     @AppStorage(Prefs.transcriptBubbles) private var transcriptBubbles = "tinted"
     @AppStorage(Prefs.transcriptTimestamps) private var transcriptTimestamps = true
+    @AppStorage(Prefs.colorBlindPalette) private var colorBlindPalette = false
 
-    private var current: Theme { Theme(rawValue: theme) ?? .black }
+    private var current: Theme {
+        Theme.resolve(followSystem: followSystem, manual: theme, dark: darkTheme, light: lightTheme,
+                      systemIsDark: systemAppearance.isDark)
+    }
+
+    private var selectedDark: Theme {
+        let candidate = Theme(rawValue: darkTheme)
+        return (candidate?.isLight == false ? candidate : nil) ?? .black
+    }
+
+    private var selectedLight: Theme {
+        let candidate = Theme(rawValue: lightTheme)
+        return (candidate?.isLight == true ? candidate : nil) ?? .light
+    }
 
     var body: some View {
         Form {
@@ -293,9 +328,23 @@ private struct AppearanceSettings: View {
                     .listRowInsets(EdgeInsets())
             }
             Section("Theme") {
-                swatches("Dark", Theme.darkThemes)
-                swatches("Light", Theme.lightThemes)
-                SettingNote("Colours for terminals, the transcript view, the file editor and the window.")
+                Toggle("Match system appearance", isOn: $followSystem)
+                    .onChange(of: followSystem) { _, enabled in
+                        guard enabled else { return }
+                        let d = UserDefaults.standard
+                        let manual = Theme(rawValue: theme) ?? .black
+                        if d.string(forKey: Prefs.darkTheme) == nil {
+                            darkTheme = (manual.isLight ? manual.counterpart : manual).rawValue
+                        }
+                        if d.string(forKey: Prefs.lightTheme) == nil {
+                            lightTheme = (manual.isLight ? manual : manual.counterpart).rawValue
+                        }
+                    }
+                swatches(followSystem && systemAppearance.isDark ? "Dark — Active" : "Dark", Theme.darkThemes, isLightGroup: false)
+                swatches(followSystem && !systemAppearance.isDark ? "Light — Active" : "Light", Theme.lightThemes, isLightGroup: true)
+                SettingNote(followSystem
+                    ? "Switches automatically between your chosen Dark and Light themes as macOS changes appearance."
+                    : "Colours for terminals, the transcript view, the file editor and the window.")
             }
             Section("Accent") {
                 Picker("Accent colour", selection: $accent) {
@@ -308,6 +357,18 @@ private struct AppearanceSettings: View {
                     }
                 }
                 SettingNote("Buttons, selection, links and the send button. Theme uses the theme's own blue. Neutral is grey throughout, which leaves colour to mean one thing: a session's state.")
+            }
+            Section("Status colours") {
+                Toggle("Colour-blind friendly", isOn: $colorBlindPalette)
+                HStack(spacing: 12) {
+                    statusSwatch("Working", Palette.working)
+                    statusSwatch("Needs you", Palette.needs)
+                    statusSwatch("Done", Palette.done)
+                    statusSwatch("Failed", Palette.error)
+                    statusSwatch("Subagent", Palette.agent)
+                }
+                .id(colorBlindPalette)
+                SettingNote("Uses the Okabe–Ito palette for status dots, badges, diffs and the transcript, so done and failed stay apart with red–green colour blindness.")
             }
             Section("Terminal") {
                 Picker("Font", selection: $fontFamily) {
@@ -348,13 +409,29 @@ private struct AppearanceSettings: View {
         .formStyle(.grouped)
     }
 
+    private func statusSwatch(_ label: String, _ color: Color) -> some View {
+        HStack(spacing: 5) {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text(label).font(.caption)
+        }
+    }
+
     /// A row of theme cards: background, chrome strip, sample text and six palette colours.
-    private func swatches(_ title: String, _ themes: [Theme]) -> some View {
+    private func swatches(_ title: String, _ themes: [Theme], isLightGroup: Bool) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.caption).foregroundStyle(.secondary)
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 5), spacing: 6) {
                 ForEach(themes) { option in
-                    Button { theme = option.rawValue } label: {
+                    let isSelected = followSystem
+                        ? (isLightGroup ? option == selectedLight : option == selectedDark)
+                        : option == current
+                    Button {
+                        if followSystem {
+                            if isLightGroup { lightTheme = option.rawValue } else { darkTheme = option.rawValue }
+                        } else {
+                            theme = option.rawValue
+                        }
+                    } label: {
                         VStack(alignment: .leading, spacing: 0) {
                             HStack(spacing: 4) {
                                 Text("Aa").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color(nsColor: option.foreground))
@@ -376,7 +453,7 @@ private struct AppearanceSettings: View {
                                 .background(Color(nsColor: option.chrome))
                         }
                         .clipShape(RoundedRectangle(cornerRadius: 7))
-                        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(option == current ? Color.accent : Color.primary.opacity(0.12), lineWidth: option == current ? 2 : 1))
+                        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(isSelected ? Color.accent : Color.primary.opacity(0.12), lineWidth: isSelected ? 2 : 1))
                     }
                     .buttonStyle(.plain)
                     .help(option.label)
@@ -536,13 +613,18 @@ private struct WindowChrome: NSViewRepresentable {
 struct ContentView: View {
     @EnvironmentObject var store: Store
     @Environment(\.openWindow) private var openWindow
+    @ObservedObject private var systemAppearance = SystemAppearance.shared
     @AppStorage(Prefs.theme) private var themeName = Theme.black.rawValue
+    @AppStorage(Prefs.followSystemAppearance) private var followSystem = false
+    @AppStorage(Prefs.darkTheme) private var darkThemeName = Theme.black.rawValue
+    @AppStorage(Prefs.lightTheme) private var lightThemeName = Theme.light.rawValue
     @AppStorage(Prefs.fontFamily) private var fontFamily = ""
     @AppStorage(Prefs.fontSize) private var fontSize = Fonts.defaultSize
     @AppStorage(Prefs.showFiles) private var showFiles = false
     @AppStorage(Prefs.showSidebar) private var showSidebar = true
     @AppStorage(Prefs.sidebarLayout) private var sidebarLayout = "rail"
     @AppStorage(Prefs.accent) private var accentChoice = "neutral"
+    @AppStorage(Prefs.colorBlindPalette) private var colorBlindPalette = false
     @AppStorage("panelWidth") private var panelWidth = 250.0
     @ObservedObject private var home = HomeState.shared
     /// The session list is closed and the projects are on a rail: the rail stays, by itself.
@@ -553,7 +635,10 @@ struct ContentView: View {
         Binding(get: { showSidebar ? .all : .detailOnly }, set: { showSidebar = $0 != .detailOnly })
     }
 
-    private var theme: Theme { Theme(rawValue: themeName) ?? .black }
+    private var theme: Theme {
+        Theme.resolve(followSystem: followSystem, manual: themeName, dark: darkThemeName, light: lightThemeName,
+                      systemIsDark: systemAppearance.isDark)
+    }
 
     /// Changes follow the selected session and its folder, which may be its project's.
     private var changesKey: String {
@@ -650,9 +735,13 @@ struct ContentView: View {
             // Picking a session goes back to it.
             store.showStats = false
         }
-        .onChange(of: themeName) { _, _ in store.applyAppearance() }
+        .onChange(of: theme) { _, _ in store.applyAppearance() }
         .onChange(of: fontFamily) { _, _ in store.applyAppearance() }
         .onChange(of: fontSize) { _, _ in store.applyAppearance() }
+        .onChange(of: colorBlindPalette) { _, _ in
+            store.objectWillChange.send()
+            home.objectWillChange.send()
+        }
         .onChange(of: store.previewRequest) { _, path in if path != nil { store.showPanel(.files) } }
         .onChange(of: changesKey, initial: true) { _, _ in
             let tab = store.selectedTab
@@ -1122,6 +1211,31 @@ struct AppCommands: Commands {
                 if let id = store.selectedTabID { store.toggleSplit(id) }
             }
             .keyboardShortcut("s", modifiers: [.command, .option])
+            // A shell is added before it is placed, so with the panes full it would be left over.
+            // A session shown alone joins the panes first, which takes one more place.
+            let panesFull = store.selectedTabID.map {
+                store.splitIDs.count + (store.splitIDs.contains($0) ? 0 : 1) >= PaneLayout.maxPanes
+            } ?? true
+            Button("Split Right") { if let id = store.selectedTabID { store.splitWithShell(id, axis: .horizontal) } }
+                .keyboardShortcut("d")
+                .disabled(panesFull)
+            Button("Split Down") { if let id = store.selectedTabID { store.splitWithShell(id, axis: .vertical) } }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
+                .disabled(panesFull)
+            // Disabled with one pane on screen, so the keys reach the terminal then.
+            let onePane = store.shownLayout == nil
+            Button("Focus Pane Left") { store.focusPane(toward: .leading) }
+                .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                .disabled(onePane)
+            Button("Focus Pane Right") { store.focusPane(toward: .trailing) }
+                .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+                .disabled(onePane)
+            Button("Focus Pane Up") { store.focusPane(toward: .top) }
+                .keyboardShortcut(.upArrow, modifiers: [.command, .option])
+                .disabled(onePane)
+            Button("Focus Pane Down") { store.focusPane(toward: .bottom) }
+                .keyboardShortcut(.downArrow, modifiers: [.command, .option])
+                .disabled(onePane)
             Button("Tidy Panes") { store.tidyPanes() }
                 .disabled(store.splitIDs.isEmpty)
             Button("Clear Panes") { store.clearSplit() }
@@ -1143,6 +1257,9 @@ struct AppCommands: Commands {
                 .keyboardShortcut("r", modifiers: [.command, .shift])
             Button("Interrupt (Ctrl-C)") { if let id = store.selectedTabID { store.stop(id) } }
                 .keyboardShortcut(".", modifiers: [.command, .shift])
+            Button("Clear Terminal") { store.selectedTabID.flatMap(store.terminal(ifRunning:))?.clearHistory() }
+                .keyboardShortcut("k", modifiers: [.command, .shift])
+                .disabled(store.selectedTabID.flatMap(store.terminal(ifRunning:)) == nil)
             Button("Kill Session") { if let id = store.selectedTabID { store.kill(id) } }
             Button("Start or Continue Session") { if let id = store.selectedTabID { store.start(id) } }
                 .keyboardShortcut(.return, modifiers: [.command, .shift])
@@ -1180,6 +1297,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let services = ServiceProvider()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        SystemAppearance.shared.startObserving()
         ShellPath.warmUp()
         Timing.logToSystem()
         SessionTranscript.playAgentName = { UserDefaults.standard.string(forKey: Prefs.playAgent) == "codex" ? "Codex" : "Claude Code" }
@@ -1191,7 +1309,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Notifier.shared.activate()
         _ = Updater.shared
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard Fonts.isBiggerKey(event.charactersIgnoringModifiers, event.modifierFlags) else { return event }
+            guard Fonts.isBiggerKey(event.charactersIgnoringModifiers, event.modifierFlags) else {
+                return TermView.handle(event) ? nil : event
+            }
             Fonts.adjustSize(by: 1)
             return nil
         }
@@ -1276,4 +1396,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return alert
     }
 }
+
 

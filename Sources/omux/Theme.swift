@@ -6,21 +6,23 @@ import SwiftUI
 /// transcript page share these, so a state looks the same wherever it shows.
 enum Palette {
     /// An agent at work, and running tool calls.
-    static let working = Color(red: 0.231, green: 0.510, blue: 0.965)
+    static var working: SwiftUI.Color { colorBlind ? SwiftUI.Color(nsColor: NSColor(hex: 0x56B4E9)) : SwiftUI.Color(red: 0.231, green: 0.510, blue: 0.965) }
     /// Waiting on you: permissions, questions, attention.
-    static let needs = Color(red: 0.961, green: 0.620, blue: 0.043)
+    static var needs: SwiftUI.Color { colorBlind ? SwiftUI.Color(nsColor: NSColor(hex: 0xE69F00)) : SwiftUI.Color(red: 0.961, green: 0.620, blue: 0.043) }
     /// Finished, passed, added lines.
-    static let done = Color(red: 0.133, green: 0.773, blue: 0.369)
+    static var done: SwiftUI.Color { colorBlind ? SwiftUI.Color(nsColor: NSColor(hex: 0x009E73)) : SwiftUI.Color(red: 0.133, green: 0.773, blue: 0.369) }
     /// Failed, removed lines, limits nearly spent.
-    static let error = Color(red: 0.937, green: 0.267, blue: 0.267)
+    static var error: SwiftUI.Color { colorBlind ? SwiftUI.Color(nsColor: NSColor(hex: 0xD55E00)) : SwiftUI.Color(red: 0.937, green: 0.267, blue: 0.267) }
     /// Subagents and other secondary actors.
-    static let agent = Color(red: 0.655, green: 0.545, blue: 0.980)
+    static var agent: SwiftUI.Color { colorBlind ? SwiftUI.Color(nsColor: NSColor(hex: 0xCC79A7)) : SwiftUI.Color(red: 0.655, green: 0.545, blue: 0.980) }
     /// A usage bar with room left: quiet, since nothing needs attention.
     static let quiet = Color.primary.opacity(0.35)
+
+    static var colorBlind: Bool { UserDefaults.standard.bool(forKey: Prefs.colorBlindPalette) }
 }
 
 enum Theme: String, CaseIterable, Identifiable {
-    case black, dark, graphite, midnight, dracula, nord, oneDark, gruvbox, solarizedDark, catppuccin, tokyoNight, monokai, rosePine, everforest,
+    case black, dark, graphite, midnight, dracula, nord, oneDark, gruvbox, solarizedDark, catppuccin, tokyoNight, monokai, rosePine, everforest, vesper,
          light, solarizedLight, catppuccinLatte, githubLight
 
     var id: String { rawValue }
@@ -42,8 +44,48 @@ enum Theme: String, CaseIterable, Identifiable {
     static var darkThemes: [Theme] { allCases.filter { !$0.isLight } }
     static var lightThemes: [Theme] { allCases.filter(\.isLight) }
 
+    /// Suggests the matching light theme for a dark theme (and vice versa) when enabling
+    /// system appearance matching for the first time.
+    var counterpart: Theme {
+        switch self {
+        case .solarizedDark: return .solarizedLight
+        case .solarizedLight: return .solarizedDark
+        case .catppuccin: return .catppuccinLatte
+        case .catppuccinLatte: return .catppuccin
+        case .midnight: return .githubLight
+        case .githubLight: return .midnight
+        default: return isLight ? .black : .light
+        }
+    }
+
+    static func resolve(
+        followSystem: Bool,
+        manual: String,
+        dark: String,
+        light: String,
+        systemIsDark: Bool
+    ) -> Theme {
+        if followSystem {
+            if systemIsDark {
+                let candidate = Theme(rawValue: dark)
+                return (candidate?.isLight == false ? candidate : nil) ?? .black
+            } else {
+                let candidate = Theme(rawValue: light)
+                return (candidate?.isLight == true ? candidate : nil) ?? .light
+            }
+        }
+        return Theme(rawValue: manual) ?? .black
+    }
+
     static var current: Theme {
-        Theme(rawValue: UserDefaults.standard.string(forKey: Prefs.theme) ?? "") ?? .black
+        let d = UserDefaults.standard
+        return resolve(
+            followSystem: d.bool(forKey: Prefs.followSystemAppearance),
+            manual: d.string(forKey: Prefs.theme) ?? Theme.black.rawValue,
+            dark: d.string(forKey: Prefs.darkTheme) ?? Theme.black.rawValue,
+            light: d.string(forKey: Prefs.lightTheme) ?? Theme.light.rawValue,
+            systemIsDark: SystemAppearance.isDark(Thread.isMainThread ? NSApp?.effectiveAppearance : nil)
+        )
     }
 
     var isLight: Bool { [.light, .solarizedLight, .catppuccinLatte, .githubLight].contains(self) }
@@ -66,6 +108,7 @@ enum Theme: String, CaseIterable, Identifiable {
         case .monokai: return (0x272822, 0x1E1F1C, 0xF8F8F2)
         case .rosePine: return (0x191724, 0x1F1D2E, 0xE0DEF4)
         case .everforest: return (0x2D353B, 0x232A2E, 0xD3C6AA)
+        case .vesper: return (0x101010, 0x181818, 0xFFFFFF)
         case .light: return (0xFBFBFB, 0xEFEFF1, 0x1F1F1F)
         case .solarizedLight: return (0xFDF6E3, 0xEEE8D5, 0x657B83)
         case .catppuccinLatte: return (0xEFF1F5, 0xE6E9EF, 0x4C4F69)
@@ -113,6 +156,9 @@ enum Theme: String, CaseIterable, Identifiable {
         case .everforest:
             hex = [0x4B565C, 0xE67E80, 0xA7C080, 0xDBBC7F, 0x7FBBB3, 0xD699B6, 0x83C092, 0xD3C6AA,
                    0x5C6A72, 0xE67E80, 0xA7C080, 0xDBBC7F, 0x7FBBB3, 0xD699B6, 0x83C092, 0x9DA9A0]
+        case .vesper:
+            hex = [0x101010, 0xF5A191, 0x90B99F, 0xE6B99D, 0xACA1CF, 0xE29ECA, 0xEA83A5, 0xA0A0A0,
+                   0x7E7E7E, 0xFF8080, 0x99FFE4, 0xFFC799, 0xB9AEDA, 0xECAAD6, 0xF591B2, 0xFFFFFF]
         case .githubLight:
             hex = [0x24292F, 0xCF222E, 0x116329, 0x4D2D00, 0x0969DA, 0x8250DF, 0x1B7C83, 0x6E7781,
                    0x57606A, 0xA40E26, 0x1A7F37, 0x633C01, 0x218BFF, 0xA475F9, 0x3192AA, 0x8C959F]
@@ -194,6 +240,7 @@ struct TranscriptStyle: Equatable {
     var timestamps = true
     /// "cards": each request with its work and answer is one card. "plain": a stream of bubbles and rows.
     var layout = "cards"
+    var colorBlind = false
 
     static var current: TranscriptStyle {
         let d = UserDefaults.standard
@@ -202,7 +249,8 @@ struct TranscriptStyle: Equatable {
                                width: d.string(forKey: Prefs.transcriptWidth) ?? "full", density: d.string(forKey: Prefs.transcriptDensity) ?? "comfortable",
                                bubbles: d.string(forKey: Prefs.transcriptBubbles) ?? "tinted",
                                timestamps: d.object(forKey: Prefs.transcriptTimestamps) as? Bool ?? true,
-                               layout: d.string(forKey: Prefs.transcriptLayout) ?? "cards")
+                               layout: d.string(forKey: Prefs.transcriptLayout) ?? "cards",
+                               colorBlind: d.bool(forKey: Prefs.colorBlindPalette))
     }
 
     /// The CSS font stack for the body text.
@@ -259,5 +307,38 @@ enum Fonts {
         let size = Self.size
         return (family.isEmpty ? nil : NSFont(name: family, size: size))
             ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+}
+
+/// Tracks macOS's system appearance (Dark / Light) independently of any window-level
+/// `preferredColorScheme` override, so views and terminals can follow the OS theme live.
+@MainActor
+final class SystemAppearance: ObservableObject {
+    static let shared = SystemAppearance()
+
+    @Published private(set) var isDark: Bool
+    private var observation: NSKeyValueObservation?
+
+    private init() {
+        isDark = Self.isDark(NSApp?.effectiveAppearance)
+        startObserving()
+    }
+
+    func startObserving() {
+        guard observation == nil, let app = NSApp else { return }
+        observation = app.observe(\.effectiveAppearance, options: [.initial, .new]) { [weak self] app, _ in
+            let dark = Self.isDark(app.effectiveAppearance)
+            Task { @MainActor [weak self] in
+                guard let self, self.isDark != dark else { return }
+                self.isDark = dark
+            }
+        }
+    }
+
+    nonisolated static func isDark(_ appearance: NSAppearance?) -> Bool {
+        guard let appearance else {
+            return UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
+        }
+        return appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
     }
 }

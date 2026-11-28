@@ -1,19 +1,40 @@
+import CryptoKit
 import Foundation
 import OmuxCLIProtocol
-import Security
 
 /// Serves the `omux` command line tool. The socket lives in a folder only this user can
 /// open, each connection must come from this user, and each request must carry the token
-/// that only sessions started by this app have in their environment.
+/// of the session it says it comes from, which only that session has in its environment.
 final class CommandServer: @unchecked Sendable {
     static let shared = CommandServer()
 
-    /// Fresh on every launch; sessions get it as OMUX_TOKEN.
-    let token: String = {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        return bytes.map { String(format: "%02x", $0) }.joined()
-    }()
+    /// Fresh on every launch; never leaves the app.
+    private let secret = SymmetricKey(size: .bits256)
+
+    /// The session's own token, given to it as OMUX_TOKEN. One token for every session let a
+    /// session pass for another by changing OMUX_TAB_ID to an id `omux list` shows, and then
+    /// type into that session and steer the sessions it started. A token tied to the id
+    /// proves the id: another session's token can't be made from one's own.
+    func token(for session: String) -> String {
+        HMAC<SHA256>.authenticationCode(for: Data(session.utf8), using: secret).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Whether `request` carries the token of the session it names, compared in constant time.
+    func authenticates(_ request: CLIRequest) -> Bool {
+        guard let mac = Self.bytes(hex: request.token) else { return false }
+        return HMAC<SHA256>.isValidAuthenticationCode(mac, authenticating: Data(request.from.utf8), using: secret)
+    }
+
+    private static func bytes(hex: String) -> Data? {
+        let digits = Array(hex.utf8)
+        guard digits.count == 64 else { return nil }
+        var data = Data(capacity: 32)
+        for index in stride(from: 0, to: 64, by: 2) {
+            guard let byte = UInt8(String(decoding: digits[index...index + 1], as: UTF8.self), radix: 16) else { return nil }
+            data.append(byte)
+        }
+        return data
+    }
 
     private(set) var socketPath: String?
     private var listenFD: Int32 = -1
@@ -90,16 +111,12 @@ final class CommandServer: @unchecked Sendable {
         // A session started while this request is answered (omux new) would otherwise inherit
         // the connection, keep it open, and leave the tool waiting for the end of the reply.
         _ = fcntl(client, F_SETFD, FD_CLOEXEC)
-        // A tool that hung up before the reply would make the write raise SIGPIPE, which kills
-        // the app and every session in it. Set here, not ignored app-wide: shells inherit that.
-        var on: Int32 = 1
-        _ = setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
         var uid = uid_t(0), gid = gid_t(0)
         guard getpeereid(client, &uid, &gid) == 0, uid == getuid() else { return }
         guard let line = readLine(client) else { return }
         let response: CLIResponse
         if let request = try? JSONDecoder().decode(CLIRequest.self, from: line) {
-            if request.token != token {
+            if !authenticates(request) {
                 // Decided here, before anything in the app is touched.
                 response = .failure("bad token; run omux inside a session omux started")
             } else {
@@ -110,9 +127,28 @@ final class CommandServer: @unchecked Sendable {
         }
         guard var data = try? JSONEncoder().encode(response) else { return }
         data.append(UInt8(ascii: "\n"))
-        var sent = 0
+        // A tool that hung up before the reply would make a plain write raise SIGPIPE, which
+        // kills the app and every session in it; SIGPIPE isn't ignored app-wide because shells
+        // inherit that. Not SO_NOSIGPIPE either: a socket whose peer left before accept()
+        // refuses the option with EINVAL, and that is the case it would be there for.
+        // SIGPIPE is also held back on this thread while the reply is written, so the write is
+        // safe whatever a system's kernel makes of the flag: a signal raised anyway stays pending
+        // here and is taken off before the thread's signals are let through again.
+        var pipe = sigset_t(), before = sigset_t()
+        sigemptyset(&pipe)
+        sigaddset(&pipe, SIGPIPE)
+        pthread_sigmask(SIG_BLOCK, &pipe, &before)
+        defer {
+            var pending = sigset_t()
+            sigpending(&pending)
+            if sigismember(&pending, SIGPIPE) == 1 { var taken: Int32 = 0; sigwait(&pipe, &taken) }
+            pthread_sigmask(SIG_SETMASK, &before, nil)
+        }
+        var sent = 0, flags = MSG_NOSIGNAL
         while sent < data.count {
-            let n = data.withUnsafeBytes { raw in write(client, raw.baseAddress! + sent, data.count - sent) }
+            let n = data.withUnsafeBytes { raw in Darwin.send(client, raw.baseAddress! + sent, data.count - sent, flags) }
+            // A kernel that doesn't know the flag refuses it: the write goes without, behind the mask.
+            if n < 0, errno == EINVAL, flags != 0 { flags = 0; continue }
             guard n > 0 else { return }
             sent += n
         }
